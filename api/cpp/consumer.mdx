@@ -1,0 +1,211 @@
+---
+title: "C++ Consumer API"
+description: "Consuming messages with RdKafka::KafkaConsumer."
+---
+
+`RdKafka::KafkaConsumer` is the high-level C++ consumer with automatic group membership and rebalancing. Link with `-lrdkafka++`.
+
+## Creating a consumer
+
+```cpp consumer_create.cpp
+#include <rdkafkacpp.h>
+
+std::string errstr;
+
+RdKafka::Conf *conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+conf->set("bootstrap.servers", "localhost:9092", errstr);
+conf->set("group.id", "my-consumer-group", errstr);
+conf->set("auto.offset.reset", "earliest", errstr);
+
+RdKafka::KafkaConsumer *consumer = RdKafka::KafkaConsumer::create(conf, errstr);
+if (!consumer) {
+    std::cerr << "Failed to create consumer: " << errstr << std::endl;
+    delete conf;
+    return 1;
+}
+delete conf;
+```
+
+## Subscribe and assign
+
+```cpp
+/* Subscribe to topics — enables group-managed rebalancing */
+RdKafka::ErrorCode KafkaConsumer::subscribe(const std::vector<std::string> &topics);
+
+/* Remove subscription */
+RdKafka::ErrorCode KafkaConsumer::unsubscribe();
+
+/* Manually assign partitions — no group rebalancing */
+RdKafka::ErrorCode KafkaConsumer::assign(const std::vector<TopicPartition *> &partitions);
+
+/* Remove manual assignment */
+RdKafka::ErrorCode KafkaConsumer::unassign();
+
+/* Get current subscription */
+RdKafka::ErrorCode KafkaConsumer::subscription(std::vector<std::string> &topics);
+
+/* Get current assignment */
+RdKafka::ErrorCode KafkaConsumer::assignment(std::vector<TopicPartition *> &partitions);
+```
+
+```cpp subscribe_example.cpp
+std::vector<std::string> topics = { "my-topic" };
+RdKafka::ErrorCode err = consumer->subscribe(topics);
+if (err) {
+    std::cerr << "Subscribe failed: " << RdKafka::err2str(err) << std::endl;
+    return 1;
+}
+```
+
+## Poll loop
+
+```cpp poll_loop.cpp
+bool run = true;
+
+while (run) {
+    RdKafka::Message *msg = consumer->consume(1000 /* ms */);
+
+    switch (msg->err()) {
+    case RdKafka::ERR_NO_ERROR:
+        std::cout << "Message on " << msg->topic_name()
+                  << " [" << msg->partition() << "] "
+                  << "at offset " << msg->offset() << ": "
+                  << std::string(static_cast<const char*>(msg->payload()), msg->len())
+                  << std::endl;
+        break;
+
+    case RdKafka::ERR__TIMED_OUT:
+        /* No message within timeout — normal */
+        break;
+
+    case RdKafka::ERR__PARTITION_EOF:
+        /* End of partition — informational, not an error */
+        break;
+
+    default:
+        std::cerr << "Consumer error: " << msg->errstr() << std::endl;
+        run = false;
+        break;
+    }
+
+    delete msg;
+}
+```
+
+<Warning>
+  Always `delete msg` after processing. Failing to do so leaks memory.
+</Warning>
+
+## RdKafka::Message methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `err()` | `ErrorCode` | `ERR_NO_ERROR` for a real message |
+| `errstr()` | `std::string` | Human-readable error string |
+| `topic_name()` | `const std::string &` | Topic name |
+| `partition()` | `int32_t` | Partition number |
+| `offset()` | `int64_t` | Message offset |
+| `payload()` | `void *` | Message payload |
+| `len()` | `size_t` | Payload length |
+| `key()` | `const std::string *` | Message key (may be NULL) |
+| `timestamp()` | `MessageTimestamp` | Timestamp struct with type and timestamp |
+| `headers()` | `RdKafka::Headers *` | Message headers (may be NULL) |
+| `msg_opaque()` | `void *` | Per-message opaque |
+
+## Offset management
+
+```cpp
+/* Commit offsets for the given partitions (async=true for async commit) */
+RdKafka::ErrorCode KafkaConsumer::commitSync(
+    std::vector<RdKafka::TopicPartition *> &offsets);
+
+RdKafka::ErrorCode KafkaConsumer::commitAsync(
+    std::vector<RdKafka::TopicPartition *> &offsets);
+
+/* Commit offset of the last consumed message */
+RdKafka::ErrorCode KafkaConsumer::commitSync(RdKafka::Message *msg);
+RdKafka::ErrorCode KafkaConsumer::commitAsync(RdKafka::Message *msg);
+
+/* Get committed offsets */
+RdKafka::ErrorCode KafkaConsumer::committed(
+    std::vector<RdKafka::TopicPartition *> &partitions, int timeout_ms);
+
+/* Get current fetch positions */
+RdKafka::ErrorCode KafkaConsumer::position(
+    std::vector<RdKafka::TopicPartition *> &partitions);
+```
+
+For at-least-once processing, disable auto-commit and commit after processing:
+
+```cpp manual_commit.cpp
+conf->set("enable.auto.commit", "false", errstr);
+
+// After processing a message:
+consumer->commitSync(msg);
+```
+
+## Rebalance callback
+
+Register a `RebalanceCb` to intercept rebalance events and perform custom logic (e.g., load offsets from external storage):
+
+```cpp rebalance_cb.cpp
+class MyRebalanceCb : public RdKafka::RebalanceCb {
+ public:
+  void rebalance_cb(RdKafka::KafkaConsumer *consumer,
+                    RdKafka::ErrorCode err,
+                    std::vector<RdKafka::TopicPartition *> &partitions) {
+    if (err == RdKafka::ERR__ASSIGN_PARTITIONS) {
+      if (consumer->rebalance_protocol() == "COOPERATIVE")
+        consumer->incremental_assign(partitions);
+      else
+        consumer->assign(partitions);
+    } else if (err == RdKafka::ERR__REVOKE_PARTITIONS) {
+      if (consumer->rebalance_protocol() == "COOPERATIVE")
+        consumer->incremental_unassign(partitions);
+      else
+        consumer->unassign();
+    } else {
+      std::cerr << "Rebalance error: " << RdKafka::err2str(err) << std::endl;
+      consumer->unassign();
+    }
+  }
+};
+
+MyRebalanceCb rebalance_cb;
+conf->set("rebalance_cb", &rebalance_cb, errstr);
+```
+
+## Seeking
+
+```cpp
+/* Seek a partition to a specific offset */
+RdKafka::ErrorCode KafkaConsumer::seek(const TopicPartition &partition,
+                                        int timeout_ms);
+```
+
+## Shutdown
+
+```cpp shutdown.cpp
+// 1. Close the consumer: commit offsets and leave the group
+consumer->close();
+
+// 2. Delete the consumer handle
+delete consumer;
+
+// 3. Wait for librdkafka to clean up background threads
+RdKafka::wait_destroyed(5000);
+```
+
+## TopicPartition
+
+```cpp
+/* Create a TopicPartition */
+RdKafka::TopicPartition *tp = RdKafka::TopicPartition::create("my-topic", 0);
+tp->set_offset(RdKafka::Topic::OFFSET_BEGINNING);
+
+/* Always destroy manually-created TopicPartition objects */
+delete tp;
+
+/* Destroy a vector of TopicPartitions */
+RdKafka::TopicPartition::destroy(partitions);
+```

@@ -1,0 +1,339 @@
+---
+title: "Client handle"
+description: "Creating, configuring, and destroying librdkafka client handles."
+---
+
+A librdkafka client is represented by an `rd_kafka_t` handle. You build a configuration object (`rd_kafka_conf_t`), set properties and callbacks on it, then hand it to `rd_kafka_new()` to create the handle.
+
+## Configuration
+
+### `rd_kafka_conf_new`
+
+```c
+rd_kafka_conf_t *rd_kafka_conf_new(void);
+```
+
+Allocates a new configuration object pre-populated with defaults. Pass this to `rd_kafka_conf_set()` to adjust properties, then to `rd_kafka_new()`.
+
+<Warning>
+After a successful `rd_kafka_new()` call the conf object is owned by the library. Do **not** call `rd_kafka_conf_destroy()` on it afterwards.
+</Warning>
+
+---
+
+### `rd_kafka_conf_set`
+
+```c
+rd_kafka_conf_res_t rd_kafka_conf_set(
+    rd_kafka_conf_t *conf,
+    const char      *name,
+    const char      *value,
+    char            *errstr,
+    size_t           errstr_size);
+```
+
+Sets a configuration property by name.
+
+<ParamField path="conf" type="rd_kafka_conf_t *" required>
+  Configuration object created with `rd_kafka_conf_new()`.
+</ParamField>
+
+<ParamField path="name" type="const char *" required>
+  Property name, e.g. `"bootstrap.servers"`, `"group.id"`.
+</ParamField>
+
+<ParamField path="value" type="const char *" required>
+  Property value as a string.
+</ParamField>
+
+<ParamField path="errstr" type="char *" required>
+  Buffer for a human-readable error message on failure.
+</ParamField>
+
+<ParamField path="errstr_size" type="size_t" required>
+  Size of `errstr` in bytes.
+</ParamField>
+
+**Returns** one of:
+
+| Value | Meaning |
+|---|---|
+| `RD_KAFKA_CONF_OK` | Property set successfully |
+| `RD_KAFKA_CONF_UNKNOWN` | Unknown property name |
+| `RD_KAFKA_CONF_INVALID` | Invalid value, or feature not compiled in |
+
+Topic-level properties may be set on the global conf object and will be applied to the implicit default topic conf.
+
+---
+
+### `rd_kafka_conf_set_dr_msg_cb`
+
+```c
+void rd_kafka_conf_set_dr_msg_cb(
+    rd_kafka_conf_t *conf,
+    void (*dr_msg_cb)(rd_kafka_t                *rk,
+                      const rd_kafka_message_t  *rkmessage,
+                      void                      *opaque));
+```
+
+Registers a **delivery report** callback (producer only). The callback is invoked once per produced message when delivery succeeds or permanently fails. Call `rd_kafka_poll()` regularly to drain the delivery report queue.
+
+<ParamField path="conf" type="rd_kafka_conf_t *" required>
+  Configuration object.
+</ParamField>
+
+<ParamField path="dr_msg_cb" type="function pointer" required>
+  Callback receiving the completed message. Check `rkmessage->err` for the delivery status.
+</ParamField>
+
+---
+
+### `rd_kafka_conf_set_error_cb`
+
+```c
+void rd_kafka_conf_set_error_cb(
+    rd_kafka_conf_t *conf,
+    void (*error_cb)(rd_kafka_t *rk,
+                     int         err,
+                     const char *reason,
+                     void       *opaque));
+```
+
+Registers an error callback. Most errors are transient and informational; the library will attempt to recover. When `err == RD_KAFKA_RESP_ERR__FATAL` call `rd_kafka_fatal_error()` and begin shutting down.
+
+<ParamField path="error_cb" type="function pointer" required>
+  Callback with the error code (`rd_kafka_resp_err_t` cast to `int`) and a human-readable reason string.
+</ParamField>
+
+---
+
+### `rd_kafka_conf_set_stats_cb`
+
+```c
+void rd_kafka_conf_set_stats_cb(
+    rd_kafka_conf_t *conf,
+    int (*stats_cb)(rd_kafka_t *rk,
+                    char       *json,
+                    size_t      json_len,
+                    void       *opaque));
+```
+
+Registers a statistics callback, triggered every `statistics.interval.ms`. The `json` argument is a JSON string describing internal metrics.
+
+Return `1` from the callback to take ownership of the `json` pointer (you must `free()` it). Return `0` and librdkafka frees it immediately.
+
+---
+
+### `rd_kafka_conf_set_log_cb`
+
+```c
+void rd_kafka_conf_set_log_cb(
+    rd_kafka_conf_t *conf,
+    void (*log_cb)(const rd_kafka_t *rk,
+                   int               level,
+                   const char       *fac,
+                   const char       *buf));
+```
+
+Overrides the log sink. `level` follows syslog severity levels (7 = DEBUG, 6 = INFO, …). Pass `NULL` to suppress all logging.
+
+<Warning>
+The callback may be called from internal librdkafka threads. Do not call any `rd_kafka_*` APIs or perform prolonged work inside it unless logs are first forwarded to a poll queue via `rd_kafka_set_log_queue()`.
+</Warning>
+
+---
+
+### `rd_kafka_conf_destroy`
+
+```c
+void rd_kafka_conf_destroy(rd_kafka_conf_t *conf);
+```
+
+Frees a configuration object that was **not** consumed by `rd_kafka_new()`. Do not call this after a successful `rd_kafka_new()`.
+
+---
+
+## Creating a handle
+
+### `rd_kafka_new`
+
+```c
+rd_kafka_t *rd_kafka_new(
+    rd_kafka_type_t  type,
+    rd_kafka_conf_t *conf,
+    char            *errstr,
+    size_t           errstr_size);
+```
+
+Creates a producer or consumer handle. On success the `conf` object is consumed by the library.
+
+<ParamField path="type" type="rd_kafka_type_t" required>
+  `RD_KAFKA_PRODUCER` or `RD_KAFKA_CONSUMER`.
+</ParamField>
+
+<ParamField path="conf" type="rd_kafka_conf_t *">
+  Configuration object. Pass `NULL` to use all defaults. Consumed on success; **must not** be used or destroyed afterwards.
+</ParamField>
+
+<ParamField path="errstr" type="char *" required>
+  Buffer for error description on failure.
+</ParamField>
+
+<ParamField path="errstr_size" type="size_t" required>
+  Size of `errstr`.
+</ParamField>
+
+Returns the new handle on success, or `NULL` on error (see `errstr`).
+
+---
+
+## Destroying a handle
+
+### `rd_kafka_destroy`
+
+```c
+void rd_kafka_destroy(rd_kafka_t *rk);
+```
+
+Destroys the handle and waits for all internal threads to exit. This is a **blocking** call. For consumers with a `group.id`, `rd_kafka_consumer_close()` is called automatically if not already done.
+
+---
+
+## Handle introspection
+
+### `rd_kafka_name`
+
+```c
+const char *rd_kafka_name(const rd_kafka_t *rk);
+```
+
+Returns the client name string (as set by `client.id` configuration).
+
+---
+
+### `rd_kafka_memberid`
+
+```c
+char *rd_kafka_memberid(const rd_kafka_t *rk);
+```
+
+Returns the broker-assigned consumer group member ID, or `NULL` if not applicable. The caller must free the string with `free()` or `rd_kafka_mem_free()`.
+
+---
+
+## Event loop
+
+### `rd_kafka_poll`
+
+```c
+int rd_kafka_poll(rd_kafka_t *rk, int timeout_ms);
+```
+
+Serves queued callbacks — delivery reports, errors, statistics, and log messages. Call this regularly from the producer's main thread.
+
+<ParamField path="rk" type="rd_kafka_t *" required>
+  Client handle.
+</ParamField>
+
+<ParamField path="timeout_ms" type="int" required>
+  Maximum wait in milliseconds. `0` = non-blocking. `-1` = wait indefinitely.
+</ParamField>
+
+Returns the number of callbacks served.
+
+<Note>
+High-level consumers should use `rd_kafka_consumer_poll()` instead. Do **not** call `rd_kafka_poll()` after calling `rd_kafka_poll_set_consumer()`.
+</Note>
+
+---
+
+## Fatal errors
+
+### `rd_kafka_fatal_error`
+
+```c
+rd_kafka_resp_err_t rd_kafka_fatal_error(
+    rd_kafka_t *rk,
+    char       *errstr,
+    size_t      errstr_size);
+```
+
+Returns the first fatal error set on this client, or `RD_KAFKA_RESP_ERR_NO_ERROR` if none. Relevant for the Idempotent Producer.
+
+<ParamField path="rk" type="rd_kafka_t *" required>
+  Client handle.
+</ParamField>
+
+<ParamField path="errstr" type="char *" required>
+  Buffer filled with a human-readable error string (only written on fatal error).
+</ParamField>
+
+<ParamField path="errstr_size" type="size_t" required>
+  Size of `errstr`.
+</ParamField>
+
+---
+
+## Full example
+
+```c
+#include <librdkafka/rdkafka.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void dr_msg_cb(rd_kafka_t *rk,
+                      const rd_kafka_message_t *rkmessage,
+                      void *opaque) {
+    if (rkmessage->err)
+        fprintf(stderr, "Delivery failed: %s\n",
+                rd_kafka_err2str(rkmessage->err));
+    else
+        fprintf(stderr, "Delivered to partition %d, offset %lld\n",
+                rkmessage->partition, (long long)rkmessage->offset);
+}
+
+static void error_cb(rd_kafka_t *rk, int err, const char *reason,
+                     void *opaque) {
+    fprintf(stderr, "Error: %s: %s\n",
+            rd_kafka_err2name((rd_kafka_resp_err_t)err), reason);
+    if (err == RD_KAFKA_RESP_ERR__FATAL) {
+        char errstr[512];
+        rd_kafka_fatal_error(rk, errstr, sizeof(errstr));
+        fprintf(stderr, "Fatal: %s\n", errstr);
+        /* initiate shutdown */
+    }
+}
+
+int main(void) {
+    char errstr[512];
+
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+
+    if (rd_kafka_conf_set(conf, "bootstrap.servers", "localhost:9092",
+                          errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+        fprintf(stderr, "Config error: %s\n", errstr);
+        rd_kafka_conf_destroy(conf);
+        return 1;
+    }
+
+    rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+    rd_kafka_conf_set_error_cb(conf, error_cb);
+
+    rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                   errstr, sizeof(errstr));
+    if (!rk) {
+        fprintf(stderr, "Failed to create producer: %s\n", errstr);
+        /* conf already destroyed on failure */
+        return 1;
+    }
+
+    printf("Producer %s created\n", rd_kafka_name(rk));
+
+    /* ... produce messages ... */
+
+    rd_kafka_flush(rk, 10000);
+    rd_kafka_destroy(rk);
+    return 0;
+}
+```

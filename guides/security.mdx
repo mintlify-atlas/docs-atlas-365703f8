@@ -1,0 +1,195 @@
+---
+title: "Security"
+description: "Configure SSL/TLS transport and SASL authentication for librdkafka."
+---
+
+librdkafka supports SSL/TLS transport encryption and SASL authentication. Choose your mechanism below and pass the required configuration properties before calling `rd_kafka_new()`.
+
+<Tabs>
+  <Tab title="SSL/TLS">
+    Use `security.protocol=ssl` for encrypted transport with mutual TLS client authentication, or `security.protocol=sasl_ssl` to layer SASL on top.
+
+    The client verifies the broker's certificate against the system CA store by default. Provide `ssl.ca.location` if you use a self-signed certificate or a private CA.
+
+    ```c
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+    char errstr[512];
+
+    /* Encrypted transport — broker certificate is verified */
+    rd_kafka_conf_set(conf, "security.protocol", "ssl",
+                      errstr, sizeof(errstr));
+
+    /* CA certificate (omit to use the system default CA store) */
+    rd_kafka_conf_set(conf, "ssl.ca.location", "/etc/ssl/certs/ca-bundle.crt",
+                      errstr, sizeof(errstr));
+
+    /* Client certificate and private key for mutual TLS */
+    rd_kafka_conf_set(conf, "ssl.certificate.location", "/path/to/client.crt",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "ssl.key.location", "/path/to/client.key",
+                      errstr, sizeof(errstr));
+
+    /* Optional: private key passphrase */
+    rd_kafka_conf_set(conf, "ssl.key.password", "my-key-passphrase",
+                      errstr, sizeof(errstr));
+
+    rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                  errstr, sizeof(errstr));
+    ```
+
+    <Warning>
+    Do not set `enable.ssl.certificate.verification=false` in production. Disabling certificate verification removes protection against rogue brokers and man-in-the-middle attacks.
+    </Warning>
+  </Tab>
+  <Tab title="SASL PLAIN">
+    Sends credentials in plaintext — use only over an encrypted connection (`sasl_ssl`) in production.
+
+    ```c
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+    char errstr[512];
+
+    rd_kafka_conf_set(conf, "security.protocol", "sasl_ssl",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.mechanism", "PLAIN",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.username", "my-user",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.password", "my-password",
+                      errstr, sizeof(errstr));
+
+    /* CA certificate if broker uses a self-signed or private CA */
+    rd_kafka_conf_set(conf, "ssl.ca.location", "/etc/ssl/certs/ca-bundle.crt",
+                      errstr, sizeof(errstr));
+
+    rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                  errstr, sizeof(errstr));
+    ```
+  </Tab>
+  <Tab title="SASL GSSAPI (Kerberos)">
+    Requires a valid Kerberos ticket (keytab or TGT) to be present on the client host.
+
+    ```c
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+    char errstr[512];
+
+    rd_kafka_conf_set(conf, "security.protocol", "sasl_ssl",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.mechanism", "GSSAPI",
+                      errstr, sizeof(errstr));
+
+    /* Principal name of the Kafka broker (matches broker's keytab) */
+    rd_kafka_conf_set(conf, "sasl.kerberos.service.name", "kafka",
+                      errstr, sizeof(errstr));
+
+    /* Optional: path to client keytab and principal */
+    rd_kafka_conf_set(conf, "sasl.kerberos.keytab", "/etc/kafka/client.keytab",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.kerberos.principal", "kafka-client@REALM.COM",
+                      errstr, sizeof(errstr));
+
+    rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                  errstr, sizeof(errstr));
+    ```
+  </Tab>
+  <Tab title="SASL SCRAM">
+    SCRAM-SHA-256 and SCRAM-SHA-512 provide salted challenge-response authentication without transmitting passwords in plaintext.
+
+    ```c
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+    char errstr[512];
+
+    rd_kafka_conf_set(conf, "security.protocol", "sasl_ssl",
+                      errstr, sizeof(errstr));
+
+    /* Choose SCRAM-SHA-256 or SCRAM-SHA-512 */
+    rd_kafka_conf_set(conf, "sasl.mechanism", "SCRAM-SHA-256",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.username", "my-user",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.password", "my-password",
+                      errstr, sizeof(errstr));
+
+    rd_kafka_conf_set(conf, "ssl.ca.location", "/etc/ssl/certs/ca-bundle.crt",
+                      errstr, sizeof(errstr));
+
+    rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                  errstr, sizeof(errstr));
+    ```
+  </Tab>
+  <Tab title="OAUTHBEARER (OIDC)">
+    librdkafka supports OAUTHBEARER with OIDC by fetching tokens from an authorization server. Set `sasl.oauthbearer.method=oidc` and provide the required OIDC properties. librdkafka refreshes the token automatically by invoking the registered token refresh callback before expiry.
+
+    **Built-in OIDC (client credentials grant)**
+
+    ```c
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+    char errstr[512];
+
+    rd_kafka_conf_set(conf, "security.protocol", "sasl_ssl",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.mechanism", "OAUTHBEARER",
+                      errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.oauthbearer.method", "oidc",
+                      errstr, sizeof(errstr));
+
+    /* Token endpoint URI */
+    rd_kafka_conf_set(conf, "sasl.oauthbearer.token.endpoint.url",
+                      "https://auth.example.com/oauth2/token",
+                      errstr, sizeof(errstr));
+
+    /* Client credentials */
+    rd_kafka_conf_set(conf, "sasl.oauthbearer.client.id",
+                      "my-client-id", errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.oauthbearer.client.secret",
+                      "my-client-secret", errstr, sizeof(errstr));
+    rd_kafka_conf_set(conf, "sasl.oauthbearer.scope",
+                      "openid kafka", errstr, sizeof(errstr));
+
+    rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                  errstr, sizeof(errstr));
+    ```
+
+    **Custom token refresh callback** (for `sasl.oauthbearer.method=default` or custom flows)
+
+    ```c
+    static void oauthbearer_token_refresh_cb(
+            rd_kafka_t *rk,
+            const char *oauthbearer_config,
+            void *opaque) {
+
+        /* Fetch the token from your authorization server */
+        const char *token_value = "eyJ...";  /* base64url JWT */
+        int64_t token_expiry_ms = 1712000000000LL; /* ms since epoch */
+        const char *principal = "my-service-account";
+
+        rd_kafka_error_t *error = rd_kafka_oauthbearer_set_token(
+            rk,
+            token_value,
+            token_expiry_ms,
+            principal,
+            NULL, 0,   /* no extension key-value pairs */
+            NULL, 0);
+
+        if (error) {
+            rd_kafka_oauthbearer_set_token_failure(
+                rk, rd_kafka_error_string(error));
+            rd_kafka_error_destroy(error);
+        }
+    }
+
+    /* Register before rd_kafka_new() */
+    rd_kafka_conf_set_oauthbearer_token_refresh_cb(conf,
+        oauthbearer_token_refresh_cb);
+    ```
+  </Tab>
+</Tabs>
+
+## Verifying the connection
+
+Enable debug logging to trace the TLS handshake and SASL exchange:
+
+```c
+rd_kafka_conf_set(conf, "debug", "security,broker", errstr, sizeof(errstr));
+```
+
+Look for log lines containing `Connected` and `Authenticated` to confirm a successful connection. Authentication errors appear as `ERR_SASL_AUTHENTICATION_FAILED` in the error callback.

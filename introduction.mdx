@@ -1,0 +1,85 @@
+---
+title: "Introduction"
+description: "An overview of librdkafka — the Apache Kafka C/C++ client library by Confluent."
+---
+
+librdkafka is a C library implementation of the [Apache Kafka](https://kafka.apache.org/) protocol, providing Producer, Consumer, and Admin clients. It also ships a native C++ interface. Originally authored by Magnus Edenhill and now maintained by [Confluent](https://www.confluent.io/), librdkafka is the foundation for Kafka client libraries across dozens of languages and frameworks.
+
+## Key features
+
+- **High throughput** — exceeds 1 million msgs/sec for producers and 3 million msgs/sec for consumers on modern hardware
+- **Exactly-Once Semantics (EOS)** — full idempotent and transactional producer support conforming to KIP-98
+- **High-level KafkaConsumer** — balanced consumer groups with automatic partition assignment (requires broker ≥ 0.9)
+- **Admin client** — create topics, describe clusters, manage offsets, and more from any client instance
+- **Compression** — snappy, gzip, lz4, and zstd codecs
+- **SSL/TLS** — encrypted transport with broker certificate verification
+- **SASL** — GSSAPI/Kerberos, PLAIN, SCRAM, and OAUTHBEARER (including OIDC) authentication
+- **Statistics** — built-in JSON metrics for producers, consumers, brokers, and partitions via `statistics.interval.ms`
+- **Guaranteed API stability** — ABI-stable C API; binary-compatible upgrades without recompilation
+- **Portable** — Linux, macOS, Windows, Solaris, FreeBSD, AIX, and more
+
+## Architecture overview
+
+librdkafka is **multi-threaded** by design. Background threads handle broker connections, batching, retransmission, and metadata refresh — the application thread only calls into the library to enqueue messages or retrieve results.
+
+Communication with the application is **poll-based**. Calling `rd_kafka_poll()` (or `rd_kafka_consumer_poll()` for consumers) drives the following callbacks:
+
+- `dr_msg_cb` — delivery report, fired once per produced message to signal success or permanent failure
+- `error_cb` — informational errors such as broker disconnections; librdkafka recovers automatically from most
+- `stats_cb` — periodic JSON metrics snapshot, if `statistics.interval.ms` is set
+- `throttle_cb` — broker quota throttling notifications
+
+Because `rd_kafka_produce()` and `rd_kafka_producev()` are asynchronous, the application **must** call `rd_kafka_poll()` regularly to serve delivery reports and release message memory.
+
+<Note>
+  All API functions are thread-safe. You may call them from any application thread at any time.
+</Note>
+
+## When to use librdkafka
+
+librdkafka is the right choice when you need:
+
+- A C or C++ Kafka client with no runtime dependency on a JVM
+- The lowest possible latency or highest possible throughput from native code
+- A foundation to build a language binding (Python, Go, .NET, Ruby, Rust, …)
+- Embedded or resource-constrained environments where a full Java runtime is impractical
+
+If you are writing application code in a higher-level language, consider using one of the official bindings built on top of librdkafka instead of integrating it directly.
+
+## Language bindings
+
+librdkafka powers official Confluent clients and a broad ecosystem of community bindings.
+
+**Official Confluent clients**
+
+| Language | Repository |
+|----------|-----------|
+| Python | [confluent-kafka-python](https://github.com/confluentinc/confluent-kafka-python) |
+| Go | [confluent-kafka-go](https://github.com/confluentinc/confluent-kafka-go) |
+| .NET / C# | [confluent-kafka-dotnet](https://github.com/confluentinc/confluent-kafka-dotnet) |
+
+**Community bindings**
+
+| Language | Repository |
+|----------|-----------|
+| Ruby | [rdkafka-ruby](https://github.com/appsignal/rdkafka-ruby) |
+| Rust | [rust-rdkafka](https://github.com/fede1024/rust-rdkafka) |
+| Node.js | [node-rdkafka](https://github.com/Blizzard/node-rdkafka) |
+| PHP | [php-rdkafka](https://github.com/arnaud-lb/php-rdkafka) |
+| Erlang | [erlkaf](https://github.com/silviucpp/erlkaf) |
+| Haskell | [hw-kafka](https://github.com/haskell-works/hw-kafka) |
+| Lua | [luardkafka](https://github.com/mistsv/luardkafka) |
+| Common Lisp | [cl-rdkafka](https://github.com/SahilKang/cl-rdkafka) |
+
+See the full list in the [language bindings reference](/reference/language-bindings).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install librdkafka on macOS, Linux, Windows, or build from source.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Produce and consume your first messages with working C and C++ code.
+  </Card>
+</CardGroup>

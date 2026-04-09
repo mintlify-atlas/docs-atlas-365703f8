@@ -1,0 +1,152 @@
+---
+title: "Idempotent producer"
+description: "Enable strict ordering and exactly-once producer guarantees with librdkafka's idempotent producer."
+---
+
+Enable idempotent production by setting `enable.idempotence=true`. librdkafka automatically adjusts `acks=all`, `retries=INT_MAX`, and `max.in.flight=5` for you. Producer instantiation will fail if you explicitly set an incompatible value (e.g., `acks=1`).
+
+## Enabling idempotence
+
+<Steps>
+  <Step title="Set enable.idempotence">
+    ```c
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+    char errstr[512];
+
+    if (rd_kafka_conf_set(conf, "enable.idempotence", "true",
+                          errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+        fprintf(stderr, "Failed to configure idempotence: %s\n", errstr);
+        rd_kafka_conf_destroy(conf);
+        exit(1);
+    }
+    ```
+  </Step>
+  <Step title="Register callbacks and create the producer">
+    ```c
+    rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+    rd_kafka_conf_set_error_cb(conf, error_cb);
+
+    rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                  errstr, sizeof(errstr));
+    if (!rk) {
+        /* conf ownership is NOT transferred on failure */
+        rd_kafka_conf_destroy(conf);
+        fprintf(stderr, "Failed to create producer: %s\n", errstr);
+        exit(1);
+    }
+    /* librdkafka takes ownership of conf on success */
+    ```
+  </Step>
+  <Step title="Produce normally">
+    The idempotent producer uses the same `rd_kafka_produce()` / `rd_kafka_producev()` API — no changes to your produce loop are required.
+
+    ```c
+    rd_kafka_resp_err_t err = rd_kafka_producev(
+        rk,
+        RD_KAFKA_V_TOPIC("my-topic"),
+        RD_KAFKA_V_PARTITION(RD_KAFKA_PARTITION_UA),
+        RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+        RD_KAFKA_V_VALUE(payload, payload_len),
+        RD_KAFKA_V_END);
+
+    if (err == RD_KAFKA_RESP_ERR__QUEUE_FULL)
+        rd_kafka_poll(rk, 1000); /* back-pressure: wait for drain */
+
+    rd_kafka_poll(rk, 0); /* serve delivery reports */
+    ```
+  </Step>
+</Steps>
+
+## Guarantees
+
+When `enable.idempotence=true` all three guarantees below are active. Only gap-less may be individually disabled.
+
+- **Exactly-once**: each message is written to the partition log exactly once, even across retries and broker failures.
+- **Ordering**: messages are written in the order they were passed to `rd_kafka_produce*()`, per partition. Ordering is safe even with `max.in.flight` up to 5.
+- **Gap-less** _(experimental)_: no individual message within a series can be silently skipped. Enable with `enable.gapless.guarantee=true`. Messages that exceed `message.timeout.ms` are still permitted to cause gaps without raising a fatal error.
+
+<Warning>
+Do not mix explicit partition targeting (hard-coded partition number) with partitioner-based partitioning on the same producer instance. Partitioner-based messages are queued separately until topic metadata arrives, and will be inserted **after** partition-explicit messages regardless of produce order, violating the ordering guarantee.
+</Warning>
+
+## Ordering and sequence numbers
+
+librdkafka maintains a per-partition 64-bit internal counter called the **msgid** (starts at 1). This counter is used to reinsert messages at their original queue position on retries. The Kafka protocol maps this to a 32-bit signed **sequence number** that resets on every PID or Epoch change.
+
+Two partition-level statistics track in-flight sequences:
+
+- `next_ack_seq` — next sequence expected to be acknowledged (last successful batch's last sequence + 1).
+- `next_err_seq` — next sequence expected to produce an error; diverges from `next_ack_seq` when a batch fails mid-stream.
+
+## Message timeout considerations
+
+If messages expire due to `message.timeout.ms` while in the producer queue, librdkafka handles this gracefully:
+
+1. It drains all in-flight requests for the affected partition.
+2. It bumps the Epoch and resets the base sequence to the first remaining queued message.
+3. Timed-out queued messages are reported with `RD_KAFKA_MSG_STATUS_NOT_PERSISTED`.
+
+Messages that time out while already in-flight are reported with `RD_KAFKA_MSG_STATUS_POSSIBLY_PERSISTED` — the broker may have written them before the client timed out.
+
+Use `rd_kafka_message_status()` in your delivery report callback:
+
+```c
+static void dr_msg_cb(rd_kafka_t *rk,
+                      const rd_kafka_message_t *rkmessage,
+                      void *opaque) {
+    if (!rkmessage->err)
+        return; /* success */
+
+    rd_kafka_msg_status_t status = rd_kafka_message_status(rkmessage);
+
+    if (status == RD_KAFKA_MSG_STATUS_POSSIBLY_PERSISTED) {
+        /* Message may have been written by the broker.
+         * Manual deduplication is needed before retrying. */
+    } else if (status == RD_KAFKA_MSG_STATUS_NOT_PERSISTED) {
+        /* Message was never transmitted; safe to retry
+         * (though ordering with subsequent messages may be affected). */
+    }
+}
+```
+
+Use a large `message.timeout.ms` to reduce the risk of in-flight timeouts.
+
+## Error handling
+
+When a fatal error occurs, the `error_cb` is called with `err == RD_KAFKA_RESP_ERR__FATAL`. Call `rd_kafka_fatal_error()` to retrieve the underlying error, then flush and destroy the producer.
+
+```c
+static void error_cb(rd_kafka_t *rk, int err,
+                     const char *reason, void *opaque) {
+    if (err != RD_KAFKA_RESP_ERR__FATAL)
+        return;
+
+    char errstr[512];
+    rd_kafka_resp_err_t orig =
+        rd_kafka_fatal_error(rk, errstr, sizeof(errstr));
+    fprintf(stderr, "FATAL ERROR: %s: %s\n",
+            rd_kafka_err2name(orig), errstr);
+    /* signal main loop to stop */
+    run = 0;
+}
+```
+
+<AccordionGroup>
+  <Accordion title="RD_KAFKA_RESP_ERR_OUT_OF_ORDER_SEQUENCE_NUMBER">
+    The broker received a sequence number larger than expected for the given PID + Epoch + Partition.
+
+    - **Head-of-line request**: the client and broker are desynchronized. There is no safe recovery without risking message loss or duplication. librdkafka raises a **fatal error**.
+    - **Non-head-of-line request**: a previous request failed, causing this sequence gap. librdkafka drains in-flight requests, resets the Producer ID, and retries automatically.
+  </Accordion>
+  <Accordion title="RD_KAFKA_RESP_ERR_DUPLICATE_SEQUENCE_NUMBER">
+    The broker's last-written sequence is already ahead of this request's base sequence — the message was already committed during a previous unacknowledged send.
+
+    This is **benign**. librdkafka treats the messages as successfully delivered. The delivery report will have no timestamp or offset set.
+  </Accordion>
+  <Accordion title="RD_KAFKA_RESP_ERR_UNKNOWN_PRODUCER_ID">
+    The broker does not recognize the PID + Epoch. Typically caused by topic retention, `DeleteRecords`, or compaction evicting the producer's state.
+
+    - If this is the first in-flight request with no pending retries (idle producer whose last message was deleted), the error is **ignored** and the Epoch is incremented.
+    - Otherwise, librdkafka raises a **fatal error** because delivery guarantees can no longer be satisfied.
+  </Accordion>
+</AccordionGroup>

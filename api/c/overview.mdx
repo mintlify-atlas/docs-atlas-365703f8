@@ -1,0 +1,102 @@
+---
+title: "C API overview"
+description: "Overview of the librdkafka C public API (rdkafka.h)."
+---
+
+The C API is the primary interface to librdkafka. All public symbols are declared in a single header file and the ABI is stable across patch releases.
+
+## Header and linking
+
+```c
+#include <librdkafka/rdkafka.h>
+```
+
+Link your application with:
+
+```bash
+gcc myapp.c -o myapp -lrdkafka
+```
+
+<Note>
+ABI stability is guaranteed for the C API. The C++ API (`rdkafkacpp.h`) does **not** carry ABI stability guarantees between minor versions.
+</Note>
+
+## Version
+
+The compile-time version is available as a macro. Use the runtime functions to guard against mismatched library versions.
+
+```c
+/* Compile-time version integer: 0xMMmmrrxx */
+#define RD_KAFKA_VERSION 0x020e00ff
+
+/* Runtime version */
+int         rd_kafka_version(void);
+const char *rd_kafka_version_str(void);
+```
+
+The integer is encoded as `MM.mm.rr.xx` in hex. `0xff` in the last byte indicates a final release.
+
+```c
+printf("librdkafka %s (0x%08x)\n",
+       rd_kafka_version_str(), rd_kafka_version());
+```
+
+## Opaque handle types
+
+All handles are forward-declared structs. Never dereference them directly.
+
+| Type | Description |
+|---|---|
+| `rd_kafka_t` | Main client handle (producer or consumer) |
+| `rd_kafka_topic_t` | Topic handle |
+| `rd_kafka_conf_t` | Global configuration object |
+| `rd_kafka_topic_conf_t` | Per-topic configuration object |
+| `rd_kafka_queue_t` | Event/message queue |
+| `rd_kafka_event_t` | Event from a queue (admin results, DR, etc.) |
+| `rd_kafka_message_t` | Kafka message (produced or consumed) |
+| `rd_kafka_headers_t` | Message headers list |
+
+## Key enumerations
+
+### `rd_kafka_type_t`
+
+Passed to `rd_kafka_new()` to select the client mode.
+
+```c
+typedef enum rd_kafka_type_t {
+    RD_KAFKA_PRODUCER,  /* Producer client */
+    RD_KAFKA_CONSUMER   /* Consumer client */
+} rd_kafka_type_t;
+```
+
+### `rd_kafka_resp_err_t`
+
+All API error codes. Internal errors are in the range `[-200, -100)` and are prefixed with `RD_KAFKA_RESP_ERR__` (double underscore). Broker errors are positive integers prefixed with `RD_KAFKA_RESP_ERR_` (single underscore).
+
+```c
+/* Common internal errors */
+RD_KAFKA_RESP_ERR_NO_ERROR        =  0   /* Success */
+RD_KAFKA_RESP_ERR__TIMED_OUT      = -185 /* Local: Timed out */
+RD_KAFKA_RESP_ERR__QUEUE_FULL     = -184 /* Local: Queue full */
+RD_KAFKA_RESP_ERR__UNKNOWN_TOPIC  = -188 /* Local: Unknown topic */
+RD_KAFKA_RESP_ERR__FATAL          = -150 /* Local: Fatal error */
+```
+
+Use `rd_kafka_err2str()` to convert any error code to a human-readable string.
+
+## Quick links
+
+<CardGroup cols={2}>
+  <Card title="Client handle" href="./client-handle">
+    Create, configure, and destroy `rd_kafka_t` handles
+  </Card>
+  <Card title="Producer API" href="./producer">
+    Produce messages with `rd_kafka_produce()` and `rd_kafka_producev()`
+  </Card>
+  <Card title="Consumer API" href="./consumer">
+    High-level consumer: subscribe, poll, commit
+  </Card>
+  <Card title="Admin API" href="./admin">
+    Create topics, alter configs, manage consumer groups
+  </Card>
+</CardGroup>

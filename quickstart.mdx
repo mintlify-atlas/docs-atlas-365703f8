@@ -1,80 +1,445 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Produce and consume messages with librdkafka using real C and C++ examples."
 ---
 
-## Get started in three steps
+This guide walks you through producing and consuming messages using librdkafka. Code examples are drawn directly from the [`examples/`](https://github.com/confluentinc/librdkafka/tree/master/examples) directory in the repository.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  Always check the return value of every librdkafka API call. Functions that return `rd_kafka_resp_err_t` return `RD_KAFKA_RESP_ERR_NO_ERROR` (zero) on success. Functions that return a pointer return `NULL` on failure and write a human-readable message to the `errstr` buffer you supply.
+</Note>
 
-### Step 1: Set up your local environment
+## Producing messages
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Tabs>
+  <Tab title="C">
+    <Steps>
+      <Step title="Create a configuration object">
+        Allocate a configuration object and set the bootstrap broker list. librdkafka uses these brokers to discover the full cluster topology.
 
-### Step 2: Deploy your changes
+        ```c
+        rd_kafka_conf_t *conf;
+        char errstr[512];
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+        conf = rd_kafka_conf_new();
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+        if (rd_kafka_conf_set(conf, "bootstrap.servers", "localhost:9092",
+                              errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+            fprintf(stderr, "%s\n", errstr);
+            return 1;
+        }
+        ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+        <Note>
+          Configuration objects are **consumed** by `rd_kafka_new()`. Do not free them manually after passing them to `rd_kafka_new()`, and do not reuse them across multiple client instances.
+        </Note>
+      </Step>
 
-### Step 3: Go live
+      <Step title="Register a delivery report callback">
+        The delivery report callback is called exactly once per message to report success or permanent failure. Register it on the configuration object before creating the producer handle.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+        ```c
+        static void dr_msg_cb(rd_kafka_t *rk,
+                              const rd_kafka_message_t *rkmessage,
+                              void *opaque) {
+            if (rkmessage->err)
+                fprintf(stderr, "%% Message delivery failed: %s\n",
+                        rd_kafka_err2str(rkmessage->err));
+            else
+                fprintf(stderr,
+                        "%% Message delivered (%zd bytes, partition %" PRId32 ")\n",
+                        rkmessage->len, rkmessage->partition);
+            /* rkmessage is destroyed automatically by librdkafka */
+        }
+
+        /* Register the callback before creating the producer */
+        rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+        ```
+      </Step>
+
+      <Step title="Create a producer handle">
+        Pass the configuration object to `rd_kafka_new()` with `RD_KAFKA_PRODUCER` to create the producer instance.
+
+        ```c
+        rd_kafka_t *rk;
+
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+        if (!rk) {
+            fprintf(stderr, "%% Failed to create new producer: %s\n", errstr);
+            return 1;
+        }
+        /* conf is now owned by rk; do not use conf after this point */
+        ```
+      </Step>
+
+      <Step title="Produce a message">
+        Use `rd_kafka_producev()` to enqueue a message for asynchronous delivery. This call returns immediately — the message is sent by background threads.
+
+        ```c
+        const char *topic = "my-topic";
+        const char *buf   = "Hello, Kafka!";
+        size_t      len   = strlen(buf);
+        rd_kafka_resp_err_t err;
+
+        err = rd_kafka_producev(
+            rk,
+            RD_KAFKA_V_TOPIC(topic),
+            RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+            RD_KAFKA_V_VALUE((void *)buf, len),
+            RD_KAFKA_V_OPAQUE(NULL),
+            RD_KAFKA_V_END);
+
+        if (err) {
+            fprintf(stderr, "%% Failed to produce to topic %s: %s\n",
+                    topic, rd_kafka_err2str(err));
+
+            if (err == RD_KAFKA_RESP_ERR__QUEUE_FULL) {
+                /* Internal queue full: wait for deliveries, then retry */
+                rd_kafka_poll(rk, 1000 /*block for max 1000ms*/);
+                /* ... retry produce ... */
+            }
+        }
+        ```
+
+        `RD_KAFKA_MSG_F_COPY` tells librdkafka to copy the payload buffer. Omit it only if you can guarantee the buffer remains valid until the delivery report callback fires.
+      </Step>
+
+      <Step title="Poll for delivery reports">
+        Call `rd_kafka_poll()` regularly in your produce loop to drive the delivery report callback (and any other registered callbacks).
+
+        ```c
+        /* Non-blocking poll to serve delivery reports */
+        rd_kafka_poll(rk, 0);
+        ```
+      </Step>
+
+      <Step title="Flush and destroy">
+        Before exiting, flush all in-flight and queued messages, then destroy the handle.
+
+        ```c
+        /* Wait up to 10 seconds for all messages to be delivered */
+        rd_kafka_flush(rk, 10 * 1000);
+
+        if (rd_kafka_outq_len(rk) > 0)
+            fprintf(stderr, "%% %d message(s) were not delivered\n",
+                    rd_kafka_outq_len(rk));
+
+        rd_kafka_destroy(rk);
+        ```
+
+        `rd_kafka_flush()` is a blocking wrapper around `rd_kafka_poll()` that returns once the output queue is empty or the timeout expires.
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="C++">
+    <Steps>
+      <Step title="Create a configuration object and set delivery callback">
+        Implement `RdKafka::DeliveryReportCb` and register it on a `RdKafka::Conf` object.
+
+        ```cpp
+        #include <librdkafka/rdkafkacpp.h>
+        #include <iostream>
+
+        class ExampleDeliveryReportCb : public RdKafka::DeliveryReportCb {
+         public:
+          void dr_cb(RdKafka::Message &message) {
+            if (message.err())
+              std::cerr << "% Message delivery failed: "
+                        << message.errstr() << std::endl;
+            else
+              std::cerr << "% Message delivered to topic "
+                        << message.topic_name()
+                        << " [" << message.partition()
+                        << "] at offset " << message.offset() << std::endl;
+          }
+        };
+
+        std::string errstr;
+        RdKafka::Conf *conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+
+        if (conf->set("bootstrap.servers", "localhost:9092", errstr)
+                != RdKafka::Conf::CONF_OK) {
+          std::cerr << errstr << std::endl;
+          exit(1);
+        }
+
+        ExampleDeliveryReportCb ex_dr_cb;
+        if (conf->set("dr_cb", &ex_dr_cb, errstr) != RdKafka::Conf::CONF_OK) {
+          std::cerr << errstr << std::endl;
+          exit(1);
+        }
+        ```
+
+        <Warning>
+          The `DeliveryReportCb` instance must outlive the `Producer` object. Allocate it on the heap or ensure its stack lifetime exceeds that of the producer.
+        </Warning>
+      </Step>
+
+      <Step title="Create a producer instance">
+        ```cpp
+        RdKafka::Producer *producer = RdKafka::Producer::create(conf, errstr);
+        if (!producer) {
+          std::cerr << "Failed to create producer: " << errstr << std::endl;
+          exit(1);
+        }
+        delete conf; /* conf is no longer needed after create() */
+        ```
+      </Step>
+
+      <Step title="Produce a message">
+        ```cpp
+        std::string topic = "my-topic";
+        std::string line  = "Hello, Kafka!";
+
+        RdKafka::ErrorCode err = producer->produce(
+            topic,
+            RdKafka::Topic::PARTITION_UA,   /* use built-in partitioner */
+            RdKafka::Producer::RK_MSG_COPY, /* copy payload */
+            const_cast<char *>(line.c_str()), line.size(),
+            NULL, 0,  /* key, key length */
+            0,        /* timestamp (0 = current time) */
+            NULL,     /* headers */
+            NULL);    /* per-message opaque */
+
+        if (err != RdKafka::ERR_NO_ERROR) {
+          std::cerr << "% Failed to produce: "
+                    << RdKafka::err2str(err) << std::endl;
+
+          if (err == RdKafka::ERR__QUEUE_FULL) {
+            producer->poll(1000); /* wait 1s, then retry */
+          }
+        }
+
+        producer->poll(0); /* serve delivery reports */
+        ```
+      </Step>
+
+      <Step title="Flush and destroy">
+        ```cpp
+        producer->flush(10 * 1000); /* wait up to 10 seconds */
+
+        if (producer->outq_len() > 0)
+          std::cerr << "% " << producer->outq_len()
+                    << " message(s) were not delivered" << std::endl;
+
+        delete producer;
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Consuming messages
+
+<Tabs>
+  <Tab title="C">
+    <Steps>
+      <Step title="Create a configuration object">
+        Set the bootstrap brokers, consumer group ID, group protocol, and offset reset policy.
+
+        ```c
+        rd_kafka_conf_t *conf;
+        char errstr[512];
+
+        conf = rd_kafka_conf_new();
+
+        if (rd_kafka_conf_set(conf, "bootstrap.servers", "localhost:9092",
+                              errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+            fprintf(stderr, "%s\n", errstr);
+            rd_kafka_conf_destroy(conf);
+            return 1;
+        }
+
+        if (rd_kafka_conf_set(conf, "group.id", "my-consumer-group",
+                              errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+            fprintf(stderr, "%s\n", errstr);
+            rd_kafka_conf_destroy(conf);
+            return 1;
+        }
+
+        /* Start reading from the earliest offset if no committed offset exists */
+        if (rd_kafka_conf_set(conf, "auto.offset.reset", "earliest",
+                              errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+            fprintf(stderr, "%s\n", errstr);
+            rd_kafka_conf_destroy(conf);
+            return 1;
+        }
+        ```
+      </Step>
+
+      <Step title="Create a consumer handle">
+        ```c
+        rd_kafka_t *rk;
+
+        rk = rd_kafka_new(RD_KAFKA_CONSUMER, conf, errstr, sizeof(errstr));
+        if (!rk) {
+            fprintf(stderr, "%% Failed to create new consumer: %s\n", errstr);
+            return 1;
+        }
+        conf = NULL; /* conf is now owned by rk */
+
+        /* Redirect per-partition queues to the main queue */
+        rd_kafka_poll_set_consumer(rk);
+        ```
+      </Step>
+
+      <Step title="Subscribe to topics">
+        ```c
+        rd_kafka_topic_partition_list_t *subscription;
+        rd_kafka_resp_err_t err;
+
+        subscription = rd_kafka_topic_partition_list_new(1);
+        rd_kafka_topic_partition_list_add(subscription, "my-topic",
+                                          RD_KAFKA_PARTITION_UA);
+
+        err = rd_kafka_subscribe(rk, subscription);
+        if (err) {
+            fprintf(stderr, "%% Failed to subscribe: %s\n",
+                    rd_kafka_err2str(err));
+            rd_kafka_topic_partition_list_destroy(subscription);
+            rd_kafka_destroy(rk);
+            return 1;
+        }
+
+        rd_kafka_topic_partition_list_destroy(subscription);
+        ```
+      </Step>
+
+      <Step title="Poll for messages">
+        Call `rd_kafka_consumer_poll()` in a loop. It returns either a message or `NULL` on timeout.
+
+        ```c
+        while (run) {
+            rd_kafka_message_t *rkm;
+
+            rkm = rd_kafka_consumer_poll(rk, 100 /*timeout ms*/);
+            if (!rkm)
+                continue; /* timeout, no message — check run flag and retry */
+
+            if (rkm->err) {
+                /* Consumer errors are informational; librdkafka recovers automatically */
+                fprintf(stderr, "%% Consumer error: %s\n",
+                        rd_kafka_message_errstr(rkm));
+                rd_kafka_message_destroy(rkm);
+                continue;
+            }
+
+            /* Process the message */
+            printf("Message on %s [%" PRId32 "] at offset %" PRId64 ":\n",
+                   rd_kafka_topic_name(rkm->rkt),
+                   rkm->partition,
+                   rkm->offset);
+
+            if (rkm->payload)
+                printf("  Value: %.*s\n", (int)rkm->len,
+                       (const char *)rkm->payload);
+
+            rd_kafka_message_destroy(rkm);
+        }
+        ```
+      </Step>
+
+      <Step title="Close and destroy">
+        Close the consumer to commit final offsets and leave the group, then destroy the handle.
+
+        ```c
+        /* Commit final offsets and leave the consumer group */
+        rd_kafka_consumer_close(rk);
+
+        /* Destroy the consumer handle */
+        rd_kafka_destroy(rk);
+        ```
+
+        <Note>
+          You do not need to call `rd_kafka_unsubscribe()` before `rd_kafka_consumer_close()`. All topic objects must be destroyed before calling `rd_kafka_destroy()`.
+        </Note>
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="C++">
+    The C++ API mirrors the C API. Use `RdKafka::KafkaConsumer` for the high-level balanced consumer.
+
+    <Steps>
+      <Step title="Create configuration and consumer">
+        ```cpp
+        #include <librdkafka/rdkafkacpp.h>
+        #include <iostream>
+        #include <vector>
+        #include <string>
+
+        std::string errstr;
+        RdKafka::Conf *conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+
+        conf->set("bootstrap.servers", "localhost:9092", errstr);
+        conf->set("group.id",          "my-consumer-group", errstr);
+        conf->set("auto.offset.reset", "earliest", errstr);
+
+        RdKafka::KafkaConsumer *consumer =
+            RdKafka::KafkaConsumer::create(conf, errstr);
+        if (!consumer) {
+          std::cerr << "Failed to create consumer: " << errstr << std::endl;
+          exit(1);
+        }
+        delete conf;
+        ```
+      </Step>
+
+      <Step title="Subscribe and poll">
+        ```cpp
+        std::vector<std::string> topics = {"my-topic"};
+        RdKafka::ErrorCode err = consumer->subscribe(topics);
+        if (err != RdKafka::ERR_NO_ERROR) {
+          std::cerr << "Failed to subscribe: "
+                    << RdKafka::err2str(err) << std::endl;
+          exit(1);
+        }
+
+        while (run) {
+          RdKafka::Message *msg = consumer->consume(100 /*timeout ms*/);
+
+          if (msg->err() == RdKafka::ERR_NO_ERROR) {
+            std::cout << "Message on " << msg->topic_name()
+                      << " [" << msg->partition()
+                      << "] at offset " << msg->offset() << std::endl;
+            if (msg->payload())
+              std::cout << "  Value: "
+                        << static_cast<const char *>(msg->payload())
+                        << std::endl;
+          } else if (msg->err() != RdKafka::ERR__TIMED_OUT) {
+            /* ERR__TIMED_OUT is normal when no message arrives within timeout */
+            std::cerr << "% Consumer error: " << msg->errstr() << std::endl;
+          }
+
+          delete msg;
+        }
+        ```
+      </Step>
+
+      <Step title="Close and delete">
+        ```cpp
+        consumer->close();
+        delete consumer;
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Full list of configuration properties for producers, consumers, and global settings.
+  </Card>
+  <Card title="Producers in depth" icon="paper-plane" href="/concepts/producers">
+    Batching, delivery guarantees, idempotent and transactional producers.
+  </Card>
+  <Card title="Consumers in depth" icon="inbox" href="/concepts/consumers">
+    Consumer groups, offset management, rebalancing, and the poll loop.
+  </Card>
+  <Card title="Error handling" icon="triangle-exclamation" href="/concepts/error-handling">
+    Retryable, permanent, and fatal errors — and how to handle each.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

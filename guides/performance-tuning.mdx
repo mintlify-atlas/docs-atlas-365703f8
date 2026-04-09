@@ -1,0 +1,160 @@
+---
+title: "Performance tuning"
+description: "Maximize throughput and minimize latency in librdkafka producers and consumers."
+---
+
+librdkafka exposes performance through a handful of configuration properties. The single most important one is `linger.ms` — it controls how long the library waits to accumulate messages into a batch before sending to the broker. Tuning this property determines whether you optimize for throughput or latency.
+
+## Throughput
+
+High throughput depends on message batching. Waiting longer fills larger batches, which amortizes per-request overhead and reduces the effect of network round-trip time.
+
+### Key properties
+
+| Property | Default | Recommended (high throughput) | Description |
+|---|---|---|---|
+| `linger.ms` | `5` | `>= 50` | Maximum time to wait for a batch to fill before sending. |
+| `batch.num.messages` | `10000` | `10000`–`1000000` | Maximum number of messages per batch. |
+| `batch.size` | `1000000` (1 MB) | `10485760` (10 MB) | Maximum total batch size in bytes. |
+| `compression.codec` | `none` | `lz4` or `snappy` | Compress batches before sending. |
+| `queue.buffering.max.messages` | `100000` | scale up | Maximum number of messages in the producer queue. |
+
+`linger.ms=5` is a good general-purpose value. For maximum throughput, use `>= 50ms`. With `linger.ms=1000`, batches of 10,000 messages per partition are typical:
+
+```
+test [0]: MessageSet with 10000 message(s) delivered
+test [3]: MessageSet with 10000 message(s) delivered
+test [0]: MessageSet with 10000 message(s) delivered
+```
+
+With `linger.ms=1`, batches stay small and request overhead dominates:
+
+```
+test [0]: MessageSet with 1514 message(s) delivered
+test [3]: MessageSet with 4 message(s) delivered
+test [0]: MessageSet with 11 message(s) delivered
+```
+
+### High-throughput producer configuration
+
+```c
+rd_kafka_conf_t *conf = rd_kafka_conf_new();
+char errstr[512];
+
+rd_kafka_conf_set(conf, "bootstrap.servers", "broker1:9092,broker2:9092",
+                  errstr, sizeof(errstr));
+
+/* Batch accumulation */
+rd_kafka_conf_set(conf, "linger.ms", "100",
+                  errstr, sizeof(errstr));
+rd_kafka_conf_set(conf, "batch.num.messages", "100000",
+                  errstr, sizeof(errstr));
+rd_kafka_conf_set(conf, "batch.size", "10485760",  /* 10 MB */
+                  errstr, sizeof(errstr));
+
+/* Compression — lz4 has the best throughput/CPU trade-off */
+rd_kafka_conf_set(conf, "compression.codec", "lz4",
+                  errstr, sizeof(errstr));
+
+/* Reliably acknowledge all in-sync replicas */
+rd_kafka_conf_set(conf, "acks", "all",
+                  errstr, sizeof(errstr));
+
+/* Increase producer queue capacity */
+rd_kafka_conf_set(conf, "queue.buffering.max.messages", "1000000",
+                  errstr, sizeof(errstr));
+rd_kafka_conf_set(conf, "queue.buffering.max.kbytes", "1048576", /* 1 GB */
+                  errstr, sizeof(errstr));
+
+rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                               errstr, sizeof(errstr));
+```
+
+### Compression
+
+Compression is applied per batch. Larger batches compress more efficiently, so `linger.ms` and `batch.size` directly affect compression ratio. Available codecs:
+
+- `lz4` — best throughput/CPU balance; recommended default.
+- `snappy` — good compression, low CPU.
+- `zstd` — highest compression ratio; slightly higher CPU cost.
+- `gzip` — highest latency; avoid for throughput-critical paths.
+
+Enable `debug=msg` to observe batch sizes and tune accordingly:
+
+```c
+rd_kafka_conf_set(conf, "debug", "msg", errstr, sizeof(errstr));
+```
+
+## Latency
+
+Low latency requires sending messages immediately rather than waiting for a batch to fill.
+
+### Key properties
+
+| Property | Default | Recommended (low latency) | Description |
+|---|---|---|---|
+| `linger.ms` | `5` | `0` or `0.1` | Send as soon as possible. |
+| `fetch.min.bytes` | `1` | `1` | Return fetch response as soon as any data is available. |
+| `fetch.wait.max.ms` | `500` | `10`–`50` | Maximum time the broker waits before responding to a fetch. |
+| `socket.nagle.disable` | `false` | `true` | Disable Nagle's algorithm for lower socket latency. |
+
+### Low-latency producer configuration
+
+```c
+rd_kafka_conf_t *conf = rd_kafka_conf_new();
+char errstr[512];
+
+rd_kafka_conf_set(conf, "bootstrap.servers", "broker1:9092",
+                  errstr, sizeof(errstr));
+
+/* Send immediately — do not wait for a full batch */
+rd_kafka_conf_set(conf, "linger.ms", "0",
+                  errstr, sizeof(errstr));
+
+/* Disable Nagle to reduce socket buffering delay */
+rd_kafka_conf_set(conf, "socket.nagle.disable", "true",
+                  errstr, sizeof(errstr));
+
+rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                               errstr, sizeof(errstr));
+```
+
+### Low-latency consumer configuration
+
+```c
+rd_kafka_conf_t *conf = rd_kafka_conf_new();
+char errstr[512];
+
+rd_kafka_conf_set(conf, "bootstrap.servers", "broker1:9092",
+                  errstr, sizeof(errstr));
+rd_kafka_conf_set(conf, "group.id", "my-consumer-group",
+                  errstr, sizeof(errstr));
+
+/* Return fetch response as soon as 1 byte is available */
+rd_kafka_conf_set(conf, "fetch.min.bytes", "1",
+                  errstr, sizeof(errstr));
+
+/* Do not wait long for data on the broker side */
+rd_kafka_conf_set(conf, "fetch.wait.max.ms", "10",
+                  errstr, sizeof(errstr));
+
+rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_CONSUMER, conf,
+                               errstr, sizeof(errstr));
+```
+
+## Latency breakdown with statistics
+
+When diagnosing where latency is added, enable statistics and inspect the following producer-side metrics:
+
+| Metric | Location | High value indicates |
+|---|---|---|
+| `int_latency` | `brokers[].int_latency` | CPU core contention between `produce()` and batch write. Check CPU load and involuntary context switches (`/proc/<pid>/status`). |
+| `outbuf_latency` | `brokers[].outbuf_latency` | CPU contention or network congestion between batch enqueue and TCP socket write. Check socket SendQ with `netstat -anp \| grep :9092`. |
+| `rtt` | `brokers[].rtt` | Broker load or network congestion. Check broker metrics and network performance. |
+| `throttle` | `brokers[].throttle` | Broker is throttling requests due to usage quotas. The throttle time is also reflected in `rtt`. |
+| `batchsize` | `topics[].batchsize` | Batch size distribution — small batches with high throughput suggest increasing `linger.ms`. |
+| `batchcnt` | `topics[].batchcnt` | Messages per batch — low counts signal batching inefficiency. |
+
+<Tip>
+Enable statistics with `statistics.interval.ms=5000` and log the JSON payload for a few minutes under production load. Compare `int_latency.p99`, `outbuf_latency.p99`, and `rtt.p99` to identify the dominant latency contributor before tuning further. See [Statistics](/guides/statistics) for details.
+</Tip>

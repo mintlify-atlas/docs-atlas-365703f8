@@ -1,0 +1,107 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "librdkafka",
+  "projectDescription": "A high-performance Apache Kafka C/C++ client library providing Producer, Consumer, and Admin clients with exactly-once semantics and multi-million message-per-second throughput.",
+  "theme": "aspen",
+  "primaryColor": "#0077CC",
+  "lightColor": "#3399FF",
+  "darkColor": "#005599",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/producers",
+              "concepts/consumers",
+              "concepts/configuration",
+              "concepts/error-handling"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/idempotent-producer",
+              "guides/transactions-eos",
+              "guides/security",
+              "guides/performance-tuning",
+              "guides/statistics"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/configuration",
+              "reference/statistics",
+              "reference/broker-compatibility",
+              "reference/language-bindings"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "C API",
+            "pages": [
+              "api/c/overview",
+              "api/c/client-handle",
+              "api/c/producer",
+              "api/c/consumer",
+              "api/c/admin"
+            ]
+          },
+          {
+            "group": "C++ API",
+            "pages": [
+              "api/cpp/overview",
+              "api/cpp/producer",
+              "api/cpp/consumer",
+              "api/cpp/admin"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "High-performance: >1M msgs/sec producer, >3M msgs/sec consumer",
+    "Full Exactly-Once Semantics (EOS) with idempotent and transactional producers",
+    "High-level balanced KafkaConsumer with consumer group support",
+    "Admin client for topic and cluster management",
+    "SSL/TLS and SASL authentication (GSSAPI, PLAIN, SCRAM, OAUTHBEARER/OIDC)",
+    "Compression support: snappy, gzip, lz4, zstd",
+    "C and C++ APIs with guaranteed ABI stability",
+    "Statistics metrics via JSON callbacks",
+    "Cross-platform: Linux, macOS, Windows, Solaris, FreeBSD, AIX",
+    "KIP-848 Next Generation Consumer Group Protocol support"
+  ],
+  "publicApiSurface": [
+    "rd_kafka_new() — Create producer/consumer handle",
+    "rd_kafka_destroy() — Destroy client handle",
+    "rd_kafka_conf_new() / rd_kafka_conf_set() — Configuration API",
+    "rd_kafka_produce() — Produce a message",
+    "rd_kafka_flush() — Wait for outstanding messages",
+    "rd_kafka_consumer_poll() — Poll for messages",
+    "rd_kafka_subscribe() / rd_kafka_assign() — Consumer topic assignment",
+    "rd_kafka_consumer_close() — Close consumer",
+    "rd_kafka_commit() / rd_kafka_commit_message() — Offset commit",
+    "rd_kafka_poll() — Serve delivery report callbacks",
+    "rd_kafka_begin_transaction() / rd_kafka_commit_transaction() — Transactions",
+    "rd_kafka_admin_*() — Admin operations (CreateTopics, DeleteTopics, etc.)",
+    "RdKafka::Producer — C++ Producer class",
+    "RdKafka::KafkaConsumer — C++ high-level Consumer class",
+    "RdKafka::Conf — C++ configuration class"
+  ]
+}

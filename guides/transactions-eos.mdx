@@ -1,0 +1,195 @@
+---
+title: "Transactions and EOS"
+description: "Exactly-Once Semantics with librdkafka's transactional producer (KIP-98)."
+---
+
+librdkafka supports Exactly-Once Semantics (EOS) as defined in [KIP-98](https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging). The transactional producer atomically commits both produced messages and consumed input offsets, guaranteeing that a consume-process-produce pipeline produces each output record exactly once even in the face of failures and restarts.
+
+<Note>
+Broker version 0.11.0 or later is required. For a **single** producer instance handling multiple input partitions (the pattern recommended here), broker version 2.5.0 or later is required (KIP-447). On older brokers, you must run one producer instance per consumed input partition.
+</Note>
+
+## Configuration
+
+Setting `transactional.id` implicitly enables the idempotent producer. Every instance started with the same `transactional.id` fences out any previous still-running instance.
+
+```c
+rd_kafka_conf_t *conf = rd_kafka_conf_new();
+char errstr[256];
+
+if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers,
+                      errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK ||
+    rd_kafka_conf_set(conf, "transactional.id",
+                      "my-transactional-producer",
+                      errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK)
+    fatal("Failed to configure producer: %s", errstr);
+
+/* Delivery report callback — used for logging failures inside a tx */
+rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                               errstr, sizeof(errstr));
+if (!rk) {
+    rd_kafka_conf_destroy(conf);
+    fatal("Failed to create producer: %s", errstr);
+}
+```
+
+`message.timeout.ms` must be less than `transaction.timeout.ms`. If `message.timeout.ms` is not explicitly set, librdkafka adjusts it automatically.
+
+## Transaction lifecycle
+
+<Steps>
+  <Step title="Initialize transactions">
+    Called **once** per producer handle lifetime. Acquires the producer ID and epoch from the transaction coordinator.
+
+    ```c
+    rd_kafka_error_t *error = rd_kafka_init_transactions(rk, -1 /* block */);
+    if (error)
+        fatal_error("init_transactions", error);
+    ```
+  </Step>
+  <Step title="Begin a transaction">
+    Called at the start of each transaction, including after an abort.
+
+    ```c
+    error = rd_kafka_begin_transaction(rk);
+    if (error)
+        fatal_error("begin_transaction", error);
+    ```
+  </Step>
+  <Step title="Produce messages">
+    Use the standard `rd_kafka_producev()` API inside the transaction. Messages are not visible to consumers (at `read_committed` isolation) until the transaction is committed.
+
+    ```c
+    rd_kafka_resp_err_t err = rd_kafka_producev(
+        rk,
+        RD_KAFKA_V_TOPIC(output_topic),
+        RD_KAFKA_V_VALUE(value, value_len),
+        RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+        RD_KAFKA_V_END);
+
+    if (err)
+        fatal("producev failed: %s", rd_kafka_err2str(err));
+    ```
+  </Step>
+  <Step title="Send offsets to transaction (EOS)">
+    To guarantee EOS for a consume-process-produce pipeline, commit the input consumer's offsets atomically with the produced messages. This is what makes input and output commit atomically.
+
+    ```c
+    /* Get consumer group metadata */
+    rd_kafka_consumer_group_metadata_t *cgmd =
+        rd_kafka_consumer_group_metadata(consumer);
+
+    /* Get consumer's current position */
+    rd_kafka_topic_partition_list_t *offsets;
+    rd_kafka_assignment(consumer, &offsets);
+    rd_kafka_position(consumer, offsets);
+
+    error = rd_kafka_send_offsets_to_transaction(rk, offsets, cgmd, -1);
+    rd_kafka_consumer_group_metadata_destroy(cgmd);
+    rd_kafka_topic_partition_list_destroy(offsets);
+
+    if (error) {
+        if (rd_kafka_error_txn_requires_abort(error)) {
+            rd_kafka_error_destroy(error);
+            /* fall through to abort */
+        } else {
+            fatal_error("send_offsets_to_transaction", error);
+        }
+    }
+    ```
+  </Step>
+  <Step title="Commit or abort">
+    **Commit** when processing succeeded:
+
+    ```c
+    error = rd_kafka_commit_transaction(rk, -1 /* block */);
+    if (error) {
+        if (rd_kafka_error_txn_requires_abort(error)) {
+            rd_kafka_error_destroy(error);
+            goto abort;
+        } else {
+            fatal_error("commit_transaction", error);
+        }
+    }
+    ```
+
+    **Abort** on any abortable error, then rewind the consumer to the last committed offsets and begin a new transaction:
+
+    ```c
+    abort:
+    error = rd_kafka_abort_transaction(rk, -1);
+    if (error)
+        fatal_error("abort_transaction", error);
+
+    /* Rewind consumer to last committed offsets */
+    rd_kafka_topic_partition_list_t *committed_offsets;
+    rd_kafka_assignment(consumer, &committed_offsets);
+    rd_kafka_committed(consumer, committed_offsets, 10 * 1000);
+    rd_kafka_seek_partitions(consumer, committed_offsets, -1);
+    rd_kafka_topic_partition_list_destroy(committed_offsets);
+
+    /* Start the next transaction */
+    error = rd_kafka_begin_transaction(rk);
+    if (error)
+        fatal_error("begin_transaction", error);
+    ```
+  </Step>
+</Steps>
+
+## Error handling
+
+The transactional API simplifies error handling to three categories. Inspect the returned `rd_kafka_error_t *` after every transactional API call.
+
+| Error type | Detection | Action |
+|---|---|---|
+| Retriable | `rd_kafka_error_is_retriable(error) == 1` | Retry the same operation. |
+| Abortable | `rd_kafka_error_txn_requires_abort(error) == 1` | Call `rd_kafka_abort_transaction()`, rewind input, and start a new transaction with `rd_kafka_begin_transaction()`. |
+| Fatal | `rd_kafka_error_is_fatal(error) == 1` | Cease operations, flush, and destroy the producer handle. |
+
+Any error that is none of the above should also be treated as fatal.
+
+```c
+static void handle_txn_error(rd_kafka_t *rk, rd_kafka_t *consumer,
+                              rd_kafka_error_t *error, const char *what) {
+    if (rd_kafka_error_is_retriable(error)) {
+        fprintf(stderr, "Retriable error on %s: %s — retrying\n",
+                what, rd_kafka_error_string(error));
+        rd_kafka_error_destroy(error);
+        return; /* caller retries */
+    }
+
+    if (rd_kafka_error_txn_requires_abort(error)) {
+        fprintf(stderr, "Abortable error on %s: %s — aborting tx\n",
+                what, rd_kafka_error_string(error));
+        rd_kafka_error_destroy(error);
+        rd_kafka_error_t *abort_err = rd_kafka_abort_transaction(rk, -1);
+        if (abort_err)
+            fatal_error("abort_transaction", abort_err);
+        /* rewind consumer and begin new transaction ... */
+        return;
+    }
+
+    fatal_error(what, error); /* fatal — does not return */
+}
+```
+
+## Old producer fencing
+
+If a new transactional producer instance is started with the same `transactional.id` while an older instance is still running, the older instance is **fenced** at its next produce, commit, or abort call. The older producer receives a fatal error with code `RD_KAFKA_RESP_ERR__FENCED`. This is the mechanism that prevents zombie producers from polluting output topics after a crash-and-restart.
+
+## Delivery report callback
+
+Inside a transaction, the delivery report callback is primarily useful for logging. Permanent delivery failures put the transaction into an abortable state — this is detected by the transactional commit/abort APIs, so you do not need to abort from inside the callback.
+
+```c
+static void dr_msg_cb(rd_kafka_t *rk,
+                      const rd_kafka_message_t *rkmessage,
+                      void *opaque) {
+    if (rkmessage->err)
+        fprintf(stderr, "Message delivery failed (tx will abort): %s\n",
+                rd_kafka_err2str(rkmessage->err));
+    /* The rkmessage is destroyed automatically by librdkafka */
+}
+```

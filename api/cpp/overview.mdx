@@ -1,0 +1,92 @@
+---
+title: "C++ API overview"
+description: "Overview of the librdkafka C++ public API (rdkafkacpp.h)."
+---
+
+The C++ API wraps the C library in an idiomatic C++ interface. Include `<rdkafkacpp.h>` and link with `-lrdkafka++`. All classes live in the `RdKafka` namespace.
+
+<Note>
+  The C++ API provides ABI stability at the source level. The underlying C library (`-lrdkafka`) is also required at link time.
+</Note>
+
+## Key classes
+
+| Class | Description |
+|-------|-------------|
+| `RdKafka::Conf` | Configuration object for client and topic settings |
+| `RdKafka::Producer` | High-level producer handle |
+| `RdKafka::KafkaConsumer` | High-level consumer with group management |
+| `RdKafka::Consumer` | Simple (legacy) consumer |
+| `RdKafka::Topic` | Topic handle for use with the simple producer/consumer |
+| `RdKafka::TopicPartition` | Represents a topic+partition+offset |
+| `RdKafka::Message` | A produced or consumed message |
+| `RdKafka::Headers` | Message headers collection |
+| `RdKafka::Metadata` | Cluster metadata |
+| `RdKafka::Queue` | Event queue |
+| `RdKafka::Event` | Callback event (errors, statistics, log messages, throttle) |
+| `RdKafka::Error` | Rich error object returned by transactional APIs |
+
+## Callback classes
+
+Override these abstract classes to receive notifications:
+
+| Class | Method | Purpose |
+|-------|--------|---------|
+| `RdKafka::DeliveryReportCb` | `dr_cb(Message &)` | Producer delivery reports |
+| `RdKafka::EventCb` | `event_cb(Event &)` | Errors, statistics, logs, throttle |
+| `RdKafka::RebalanceCb` | `rebalance_cb(KafkaConsumer *, ErrorCode, vector<TopicPartition*> &)` | Consumer rebalances |
+| `RdKafka::OffsetCommitCb` | `offset_commit_cb(ErrorCode, vector<TopicPartition*> &)` | Offset commit results |
+| `RdKafka::PartitionerCb` | `partitioner_cb(Topic *, string *, int32_t, void *)` | Custom partitioner |
+| `RdKafka::OAuthBearerTokenRefreshCb` | `oauthbearer_token_refresh_cb(Handle *, string &)` | OAUTHBEARER token refresh |
+
+## Version
+
+```cpp
+#include <rdkafkacpp.h>
+
+// Compile-time version macro (hex: MM.mm.rr.xx)
+int ver = RD_KAFKA_VERSION;  // e.g. 0x020e00ff
+
+// Runtime version
+int ver = RdKafka::version();
+std::string ver_str = RdKafka::version_str();
+```
+
+## Error handling
+
+The `RdKafka::ErrorCode` enum covers all error conditions:
+
+```cpp
+RdKafka::ErrorCode err = producer->produce(...);
+if (err != RdKafka::ERR_NO_ERROR) {
+    std::cerr << "Produce error: " << RdKafka::err2str(err) << std::endl;
+}
+```
+
+For transactional APIs, `RdKafka::Error *` objects are returned with richer metadata:
+
+```cpp
+RdKafka::Error *error = producer->commit_transaction(5000);
+if (error) {
+    std::cerr << "Commit failed: " << error->str() << std::endl;
+    if (error->txn_requires_abort()) {
+        // abort and retry
+    }
+    delete error;
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Producer API" icon="paper-plane" href="/api/cpp/producer">
+    Produce messages using `RdKafka::Producer`.
+  </Card>
+  <Card title="Consumer API" icon="inbox" href="/api/cpp/consumer">
+    Consume messages using `RdKafka::KafkaConsumer`.
+  </Card>
+  <Card title="Admin API" icon="gear" href="/api/cpp/admin">
+    Manage topics and groups with the Admin API.
+  </Card>
+  <Card title="C API Overview" icon="c" href="/api/c/overview">
+    The underlying C API reference.
+  </Card>
+</CardGroup>

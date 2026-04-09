@@ -1,0 +1,203 @@
+---
+title: "Error handling"
+description: Understanding and handling errors in librdkafka
+---
+
+## Error types
+
+All librdkafka errors are represented by the `rd_kafka_resp_err_t` enum. The enum is split into two groups:
+
+<Tabs>
+  <Tab title="Local errors (RD_KAFKA_RESP_ERR__*)">
+    Errors generated inside librdkafka, identified by a double-underscore prefix. They describe client-side failures such as queue overflow, timeouts, transport problems, and fatal conditions.
+
+    Examples:
+    - `RD_KAFKA_RESP_ERR__QUEUE_FULL` — internal message queue is full
+    - `RD_KAFKA_RESP_ERR__MSG_TIMED_OUT` — message timed out before delivery
+    - `RD_KAFKA_RESP_ERR__TRANSPORT` — broker transport failure
+    - `RD_KAFKA_RESP_ERR__ALL_BROKERS_DOWN` — no broker connections available
+    - `RD_KAFKA_RESP_ERR__FATAL` — a fatal error has occurred; see `rd_kafka_fatal_error()`
+
+    These appear in log messages as `"Local: <description>"`.
+  </Tab>
+  <Tab title="Broker errors (RD_KAFKA_RESP_ERR_*)">
+    Error codes returned by the Kafka broker in protocol responses. They are identified by a single underscore. A value of `RD_KAFKA_RESP_ERR_NO_ERROR` (0) means success.
+
+    Examples:
+    - `RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART` — topic or partition does not exist
+    - `RD_KAFKA_RESP_ERR_MSG_SIZE_TOO_LARGE` — message exceeds broker's max size
+    - `RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED` — ACL denied the operation
+    - `RD_KAFKA_RESP_ERR_NOT_ENOUGH_REPLICAS` — not enough in-sync replicas to satisfy `acks`
+
+    These appear in log messages as `"Broker: <description>"`.
+  </Tab>
+</Tabs>
+
+## Converting errors to strings
+
+Use `rd_kafka_err2str()` to get a human-readable description for any error code:
+
+```c
+rd_kafka_resp_err_t err = rd_kafka_producev(rk, ...);
+if (err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+    fprintf(stderr, "Produce failed: %s\n", rd_kafka_err2str(err));
+}
+```
+
+For errors embedded in an `rd_kafka_message_t` (from a delivery report or consumer poll), use `rd_kafka_message_errstr()` which may include additional context beyond the error code:
+
+```c
+if (rkm->err) {
+    fprintf(stderr, "Message error: %s\n",
+            rd_kafka_message_errstr(rkm));
+}
+```
+
+## Error callback
+
+The error callback (`error_cb`) is called for informational, non-fatal errors that librdkafka encounters during operation — for example, a failed broker connection or a transient metadata fetch error. The client recovers from these automatically.
+
+```c
+static void error_cb(rd_kafka_t *rk,
+                     int err_code,
+                     const char *reason,
+                     void *opaque) {
+    rd_kafka_resp_err_t err = (rd_kafka_resp_err_t)err_code;
+
+    if (err == RD_KAFKA_RESP_ERR__FATAL) {
+        /* A fatal error has occurred — retrieve the underlying cause */
+        char errstr[512];
+        rd_kafka_resp_err_t fatal_err =
+            rd_kafka_fatal_error(rk, errstr, sizeof(errstr));
+        fprintf(stderr, "FATAL ERROR: %s: %s\n",
+                rd_kafka_err2str(fatal_err), errstr);
+        /* Begin shutdown */
+    } else {
+        fprintf(stderr, "Error (auto-recovered): %s: %s\n",
+                rd_kafka_err2str(err), reason);
+    }
+}
+
+/* Register the callback before creating the handle */
+rd_kafka_conf_set_error_cb(conf, error_cb);
+```
+
+<Note>
+An application does not need to take action for most errors delivered through the error callback. librdkafka automatically retries connection failures, metadata refreshes, and similar transient problems.
+</Note>
+
+## Fatal errors
+
+A fatal error renders the client unable to continue operating. When the error callback fires with `err == RD_KAFKA_RESP_ERR__FATAL`, call `rd_kafka_fatal_error()` to retrieve the underlying cause and then destroy the client instance.
+
+```c
+char errstr[512];
+rd_kafka_resp_err_t fatal = rd_kafka_fatal_error(rk, errstr, sizeof(errstr));
+fprintf(stderr, "Fatal: %s (%s)\n", rd_kafka_err2str(fatal), errstr);
+rd_kafka_destroy(rk);
+```
+
+Common conditions that trigger a fatal error:
+
+- Idempotent producer detects an unrecoverable sequence-number desynchronisation (`RD_KAFKA_RESP_ERR_OUT_OF_ORDER_SEQUENCE_NUMBER`)
+- Producer ID is unknown to the broker and cannot be recovered (`RD_KAFKA_RESP_ERR_UNKNOWN_PRODUCER_ID`)
+- A static consumer group member is fenced by a duplicate `group.instance.id` (`RD_KAFKA_RESP_ERR__FATAL`)
+- A transactional producer instance is fenced by a newer producer with the same `transactional.id` (`RD_KAFKA_RESP_ERR__FENCED`)
+
+## Producer delivery failures
+
+Delivery failures fall into two categories:
+
+<AccordionGroup>
+  <Accordion title="Retryable errors">
+    librdkafka retries these automatically according to `message.send.max.retries`, `retry.backoff.ms`, and `retry.backoff.max.ms`. They are never reported to the application unless retries are exhausted or `message.timeout.ms` expires.
+
+    - `ERR__TIMED_OUT_QUEUE` — message queued but not yet sent; no risk of duplication on retry
+    - `ERR__TIMED_OUT` / `ERR__TRANSPORT` — message may have been sent; retry may cause duplication
+    - `ERR_REQUEST_TIMED_OUT`, `ERR_NOT_ENOUGH_REPLICAS` — transient broker errors
+    - `ERR_LEADER_NOT_AVAILABLE`, `ERR_NOT_LEADER_FOR_PARTITION` — stale metadata; a new leader lookup is triggered automatically
+  </Accordion>
+  <Accordion title="Permanent errors">
+    These cause an immediate delivery failure and are reported through the delivery report callback. The application should not retry them.
+
+    - `ERR_CORRUPT_MESSAGE`
+    - `ERR_MSG_SIZE_TOO_LARGE` — adjust `message.max.bytes`
+    - `ERR_UNKNOWN_TOPIC_OR_PART` — topic or partition does not exist
+    - `ERR_TOPIC_AUTHORIZATION_FAILED`
+    - `ERR_CLUSTER_AUTHORIZATION_FAILED`
+    - `ERR_INVALID_REQUIRED_ACKS`
+    - `ERR_RECORD_LIST_TOO_LARGE`
+  </Accordion>
+</AccordionGroup>
+
+## Message persistence status
+
+When a delivery report fires with an error, the application may not know whether the message was actually written to the Kafka log. Call `rd_kafka_message_status()` in the delivery report callback to determine the persistence state:
+
+```c
+static void dr_msg_cb(rd_kafka_t *rk,
+                      const rd_kafka_message_t *rkmessage,
+                      void *opaque) {
+    if (rkmessage->err) {
+        rd_kafka_msg_status_t status =
+            rd_kafka_message_status(rkmessage);
+
+        switch (status) {
+        case RD_KAFKA_MSG_STATUS_NOT_PERSISTED:
+            /* Message was never sent to the broker.
+             * Safe to retry; no risk of duplication. */
+            break;
+        case RD_KAFKA_MSG_STATUS_POSSIBLY_PERSISTED:
+            /* Message was transmitted but no ack was received.
+             * Retry may cause duplication. */
+            break;
+        case RD_KAFKA_MSG_STATUS_PERSISTED:
+            /* Message was acknowledged by the broker.
+             * No retry needed. */
+            break;
+        }
+    }
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| `RD_KAFKA_MSG_STATUS_NOT_PERSISTED` | Message was never transmitted to the broker, or was explicitly rejected. Retry is safe with no risk of duplication. |
+| `RD_KAFKA_MSG_STATUS_POSSIBLY_PERSISTED` | Message was transmitted but acknowledgement was not received (e.g., timed out in-flight). Retry may cause duplication. |
+| `RD_KAFKA_MSG_STATUS_PERSISTED` | Message was written to the broker log and fully acknowledged. No retry needed. |
+
+## Transactional error types
+
+When using the transactional producer API, errors returned by transactional functions (`rd_kafka_begin_transaction()`, `rd_kafka_commit_transaction()`, etc.) are of type `rd_kafka_error_t *` rather than `rd_kafka_resp_err_t`. These rich error objects carry additional classification flags.
+
+```c
+rd_kafka_error_t *error = rd_kafka_begin_transaction(rk);
+if (error) {
+    if (rd_kafka_error_is_retriable(error)) {
+        /* Temporary failure; the operation may be safely retried */
+    } else if (rd_kafka_error_txn_requires_abort(error)) {
+        /* Current transaction has failed; call rd_kafka_abort_transaction()
+         * before starting a new one */
+    } else if (rd_kafka_error_is_fatal(error)) {
+        /* Unrecoverable; destroy the producer */
+    } else {
+        /* Treat unknown errors as fatal */
+    }
+
+    fprintf(stderr, "Transaction error: %s\n",
+            rd_kafka_error_string(error));
+    rd_kafka_error_destroy(error);
+}
+```
+
+### Error classification functions
+
+| Function | Returns true when… |
+|----------|--------------------|
+| `rd_kafka_error_is_retriable(error)` | The operation failed temporarily and can be retried without side effects |
+| `rd_kafka_error_txn_requires_abort(error)` | The current transaction is in a failed state; call `rd_kafka_abort_transaction()` and restart |
+| `rd_kafka_error_is_fatal(error)` | The producer instance is unrecoverable; destroy it |
+
+<Warning>
+Always destroy `rd_kafka_error_t *` objects returned by transactional functions by calling `rd_kafka_error_destroy()` to avoid memory leaks.
+</Warning>

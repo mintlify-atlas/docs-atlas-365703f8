@@ -1,0 +1,155 @@
+---
+title: "Installation"
+description: "Install librdkafka on macOS, Linux, Windows, or build from source."
+---
+
+## Package managers
+
+<Tabs>
+  <Tab title="macOS">
+    Install librdkafka with [Homebrew](https://brew.sh/):
+
+    ```bash
+    brew install librdkafka
+    ```
+
+    Homebrew installs both the runtime library and the development headers.
+  </Tab>
+
+  <Tab title="Debian / Ubuntu">
+    Add the Confluent APT repository following the [Confluent installation guide](https://docs.confluent.io/current/installation/installing_cp/deb-ubuntu.html#get-the-software), then install the development package:
+
+    ```bash
+    apt install librdkafka-dev
+    ```
+
+    This installs `librdkafka1` (runtime) and `librdkafka-dev` (headers and static library).
+  </Tab>
+
+  <Tab title="RedHat / CentOS / Fedora">
+    Add the Confluent YUM repository following the [Confluent installation guide](https://docs.confluent.io/current/installation/installing_cp/rhel-centos.html#get-the-software), then install the development package:
+
+    ```bash
+    yum install librdkafka-devel
+    ```
+  </Tab>
+
+  <Tab title="Windows">
+    Reference the [librdkafka.redist](https://www.nuget.org/packages/librdkafka.redist/) NuGet package in your Visual Studio project.
+
+    In the NuGet Package Manager console:
+
+    ```powershell
+    Install-Package librdkafka.redist
+    ```
+
+    For building from source on Windows with MSVC, see [README.win32](https://github.com/confluentinc/librdkafka/blob/master/README.win32).
+  </Tab>
+
+  <Tab title="vcpkg">
+    Install librdkafka using the [vcpkg](https://github.com/Microsoft/vcpkg) dependency manager:
+
+    ```bash
+    vcpkg install librdkafka
+    ```
+
+    The vcpkg port is maintained by Microsoft and the community. If the version is out of date, open an issue or pull request on the [vcpkg repository](https://github.com/Microsoft/vcpkg).
+  </Tab>
+</Tabs>
+
+## Build from source
+
+<Steps>
+  <Step title="Install requirements">
+    The following tools and libraries are required or optional:
+
+    | Dependency | Required | Purpose |
+    |-----------|----------|---------|
+    | GNU toolchain + GNU make | Yes | Compilation |
+    | pthreads | Yes | Threading |
+    | zlib-dev | No | gzip compression |
+    | libssl-dev | No | SSL transport and SASL SCRAM |
+    | libsasl2-dev | No | SASL GSSAPI/Kerberos |
+    | libzstd-dev | No | ZStd compression |
+    | libcurl-dev | No | SASL OAUTHBEARER OIDC |
+  </Step>
+
+  <Step title="Configure">
+    Run `./configure` to detect available dependencies automatically:
+
+    ```bash
+    ./configure
+    ```
+
+    To let the build system download and install missing dependencies using the system package manager:
+
+    ```bash
+    ./configure --install-deps
+    ```
+
+    To build all dependencies from source instead:
+
+    ```bash
+    ./configure --install-deps --source-deps-only
+    ```
+  </Step>
+
+  <Step title="Build and install">
+    ```bash
+    make
+    sudo make install
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  For the experimental CMake build, see the [CMake instructions](https://github.com/confluentinc/librdkafka/blob/master/packaging/cmake/README.md). This build is unsupported.
+</Note>
+
+## Linking your application
+
+Link with `-lrdkafka` for the C API or `-lrdkafka++` for the C++ API:
+
+<CodeGroup>
+
+```bash C
+gcc myapp.c -o myapp -lrdkafka
+```
+
+```bash C++
+g++ myapp.cpp -o myapp -lrdkafka++
+```
+
+</CodeGroup>
+
+Include the appropriate header in your source file:
+
+<CodeGroup>
+
+```c C
+#include <librdkafka/rdkafka.h>
+```
+
+```cpp C++
+#include <librdkafka/rdkafkacpp.h>
+```
+
+</CodeGroup>
+
+## Static ZStd linking
+
+<Tip>
+  Statically linking ZStd (version ≥ 1.2.1) in the producer enables encoding the original uncompressed size in the ZStd frame header. This allows consumers to pre-allocate the exact output buffer size, improving consumer throughput.
+</Tip>
+
+To enable static ZStd linking, pass the path to `libzstd.a` before running `./configure`:
+
+```bash
+STATIC_LIB_libzstd=/path/to/libzstd.a ./configure --enable-static
+```
+
+On macOS with Homebrew:
+
+```bash
+STATIC_LIB_libzstd=$(brew ls -v zstd | grep libzstd.a$) ./configure --enable-static
+```

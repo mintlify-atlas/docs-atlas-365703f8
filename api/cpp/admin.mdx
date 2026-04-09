@@ -1,0 +1,152 @@
+---
+title: "C++ Admin API"
+description: "Performing administrative operations from C++ using librdkafka."
+---
+
+The `rdkafkacpp.h` C++ header does not expose dedicated Admin API classes. To perform administrative operations (create topics, manage consumer groups, etc.) from a C++ application, use the **C Admin API** (`rdkafka.h`) directly — it is fully usable from C++ code.
+
+<Note>
+  The C Admin API is declared in `rdkafka.h` and accessible from any C++ translation unit. All C API types and functions work directly alongside C++ code.
+</Note>
+
+## Using the C Admin API from C++
+
+Link with both `-lrdkafka++` and `-lrdkafka` (the C++ library depends on the C library). Include both headers:
+
+```cpp
+#include <rdkafkacpp.h>   // C++ producer/consumer
+#include <librdkafka/rdkafka.h>  // C Admin API
+```
+
+You can extract the underlying `rd_kafka_t *` handle from a C++ `RdKafka::Handle` using `RdKafka::Handle::c_ptr()`:
+
+<Note>
+  `c_ptr()` is not part of the public API but you can also simply create a C-level `rd_kafka_t *` producer handle for admin-only work, keeping it entirely within the C API.
+</Note>
+
+The recommended approach for admin-only work is to create a C-level producer handle and use the C Admin API exclusively:
+
+```cpp admin_from_cpp.cpp
+#include <librdkafka/rdkafka.h>
+#include <stdio.h>
+
+int main() {
+    char errstr[512];
+
+    /* Create a C-level producer handle for admin operations */
+    rd_kafka_conf_t *conf = rd_kafka_conf_new();
+    rd_kafka_conf_set(conf, "bootstrap.servers", "localhost:9092",
+                      errstr, sizeof(errstr));
+
+    rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                   errstr, sizeof(errstr));
+    if (!rk) {
+        fprintf(stderr, "Failed to create handle: %s\n", errstr);
+        return 1;
+    }
+
+    /* Create a result queue */
+    rd_kafka_queue_t *queue = rd_kafka_queue_new(rk);
+
+    /* === Create a topic === */
+    rd_kafka_NewTopic_t *nt = rd_kafka_NewTopic_new(
+        "my-new-topic", 3 /* partitions */, 1 /* replication_factor */,
+        errstr, sizeof(errstr));
+
+    rd_kafka_NewTopic_t *new_topics[] = { nt };
+    rd_kafka_CreateTopics(rk, new_topics, 1, NULL, queue);
+    rd_kafka_NewTopic_destroy(nt);
+
+    /* Poll for result */
+    rd_kafka_event_t *event = rd_kafka_queue_poll(queue, 10000);
+    if (event) {
+        if (rd_kafka_event_error(event))
+            fprintf(stderr, "CreateTopics failed: %s\n",
+                    rd_kafka_event_error_string(event));
+        else
+            fprintf(stdout, "Topic created successfully\n");
+        rd_kafka_event_destroy(event);
+    }
+
+    rd_kafka_queue_destroy(queue);
+    rd_kafka_destroy(rk);
+    return 0;
+}
+```
+
+## Available admin operations
+
+All admin operations follow the same asynchronous pattern: fire the operation, poll the result queue for an event, inspect the event. See the [C Admin API reference](/api/c/admin) for the full list of available operations:
+
+<CardGroup cols={2}>
+  <Card title="Topic operations" icon="table" href="/api/c/admin">
+    `rd_kafka_CreateTopics`, `rd_kafka_DeleteTopics`, `rd_kafka_CreatePartitions`
+  </Card>
+  <Card title="Config operations" icon="gear" href="/api/c/admin">
+    `rd_kafka_DescribeConfigs`, `rd_kafka_AlterConfigs`, `rd_kafka_IncrementalAlterConfigs`
+  </Card>
+  <Card title="Consumer group operations" icon="users" href="/api/c/admin">
+    `rd_kafka_ListConsumerGroups`, `rd_kafka_DescribeConsumerGroups`, `rd_kafka_DeleteGroups`
+  </Card>
+  <Card title="Cluster operations" icon="server" href="/api/c/admin">
+    `rd_kafka_DescribeCluster`, `rd_kafka_DescribeTopics`, `rd_kafka_ElectLeaders`
+  </Card>
+</CardGroup>
+
+## Metadata query (C++ native)
+
+The C++ `Handle` class does expose a metadata query method that covers common use cases — listing topics and brokers:
+
+```cpp metadata_query.cpp
+#include <rdkafkacpp.h>
+#include <iostream>
+
+// producer or consumer handle
+RdKafka::Metadata *metadata;
+RdKafka::ErrorCode err = producer->metadata(
+    true,       // all_topics: true = all cluster topics, false = local only
+    nullptr,    // only_rkt: NULL = all topics
+    &metadata,
+    5000);      // timeout_ms
+
+if (err != RdKafka::ERR_NO_ERROR) {
+    std::cerr << "Metadata query failed: " << RdKafka::err2str(err) << std::endl;
+} else {
+    std::cout << "Brokers:" << std::endl;
+    for (const auto *broker : *metadata->brokers())
+        std::cout << "  " << broker->id() << ": "
+                  << broker->host() << ":" << broker->port() << std::endl;
+
+    std::cout << "Topics:" << std::endl;
+    for (const auto *topic : *metadata->topics())
+        std::cout << "  " << topic->topic()
+                  << " (" << topic->partitions()->size() << " partitions)"
+                  << std::endl;
+
+    delete metadata;
+}
+```
+
+`RdKafka::Metadata` methods:
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `brokers()` | `const BrokerMetadataVector *` | List of all known brokers |
+| `topics()` | `const TopicMetadataVector *` | List of topics |
+| `orig_broker_id()` | `int32_t` | Broker ID that served this metadata |
+| `orig_broker_name()` | `std::string` | Broker hostname:port |
+
+Each `BrokerMetadata` has `id()`, `host()`, `port()`. Each `TopicMetadata` has `topic()`, `partitions()`, and `err()`.
+
+## Watermark offsets (C++ native)
+
+Query low/high watermark offsets for a partition directly from C++:
+
+```cpp watermarks.cpp
+int64_t low, high;
+RdKafka::ErrorCode err = producer->query_watermark_offsets(
+    "my-topic", 0 /* partition */, &low, &high, 5000 /* timeout_ms */);
+
+if (err == RdKafka::ERR_NO_ERROR)
+    std::cout << "Partition 0: low=" << low << " high=" << high << std::endl;
+```

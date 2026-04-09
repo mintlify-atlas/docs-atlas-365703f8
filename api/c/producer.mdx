@@ -1,0 +1,201 @@
+---
+title: "Producer API"
+description: "C API reference for producing messages with librdkafka."
+---
+
+The producer API lets you send messages to Kafka topics. Include `<rdkafka.h>` and link with `-lrdkafka`.
+
+## Topic handle
+
+Before producing, create a topic handle with `rd_kafka_topic_new()`.
+
+```c
+rd_kafka_topic_t *rd_kafka_topic_new(rd_kafka_t *rk,
+                                      const char *topic,
+                                      rd_kafka_topic_conf_t *conf);
+```
+
+<ParamField path="rk" type="rd_kafka_t *" required>
+  The client handle created with `rd_kafka_new()`.
+</ParamField>
+<ParamField path="topic" type="const char *" required>
+  Topic name string.
+</ParamField>
+<ParamField path="conf" type="rd_kafka_topic_conf_t *">
+  Optional topic configuration. Pass `NULL` for defaults. librdkafka takes ownership on success.
+</ParamField>
+
+Destroy the topic handle before destroying the client handle:
+
+```c
+void rd_kafka_topic_destroy(rd_kafka_topic_t *rkt);
+```
+
+## Producing messages
+
+### rd_kafka_produce
+
+Produce a single message. Returns `0` on success or `-1` on error (check `rd_kafka_last_error()`).
+
+```c
+int rd_kafka_produce(rd_kafka_topic_t *rkt,
+                     int32_t partition,
+                     int msgflags,
+                     void *payload,
+                     size_t len,
+                     const void *key,
+                     size_t keylen,
+                     void *msg_opaque);
+```
+
+<ParamField path="rkt" type="rd_kafka_topic_t *" required>
+  Topic handle from `rd_kafka_topic_new()`.
+</ParamField>
+<ParamField path="partition" type="int32_t" required>
+  Target partition number, or `RD_KAFKA_PARTITION_UA` to use the configured partitioner.
+</ParamField>
+<ParamField path="msgflags" type="int" required>
+  Memory ownership flags (see below).
+</ParamField>
+<ParamField path="payload" type="void *" required>
+  Message payload pointer.
+</ParamField>
+<ParamField path="len" type="size_t" required>
+  Payload length in bytes.
+</ParamField>
+<ParamField path="key" type="const void *">
+  Optional message key for partitioning.
+</ParamField>
+<ParamField path="keylen" type="size_t">
+  Key length in bytes.
+</ParamField>
+<ParamField path="msg_opaque" type="void *">
+  Per-message opaque pointer, passed back in the delivery report callback.
+</ParamField>
+
+**Message flags:**
+
+| Flag | Description |
+|------|-------------|
+| `RD_KAFKA_MSG_F_FREE` | librdkafka frees `payload` after use |
+| `RD_KAFKA_MSG_F_COPY` | librdkafka copies `payload` into an internal buffer |
+| `RD_KAFKA_MSG_F_BLOCK` | Block `produce()` if the producer queue is full |
+| `RD_KAFKA_MSG_F_PARTITION` | Use `partition` field exactly (bypass partitioner) |
+
+If neither `F_FREE` nor `F_COPY` is set, the application retains ownership (zero-copy; `payload` must remain valid until the delivery report fires).
+
+### rd_kafka_producev
+
+Variadic produce function — more flexible, no topic handle required.
+
+```c
+rd_kafka_resp_err_t rd_kafka_producev(rd_kafka_t *rk, ...);
+```
+
+Terminate the argument list with `RD_KAFKA_V_END`. Example:
+
+```c rdkafka_producev.c
+rd_kafka_resp_err_t err = rd_kafka_producev(
+    rk,
+    RD_KAFKA_V_TOPIC("my-topic"),
+    RD_KAFKA_V_PARTITION(RD_KAFKA_PARTITION_UA),
+    RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+    RD_KAFKA_V_VALUE(payload, payload_len),
+    RD_KAFKA_V_KEY(key, key_len),
+    RD_KAFKA_V_OPAQUE(my_opaque),
+    RD_KAFKA_V_END);
+
+if (err) {
+    fprintf(stderr, "Produce failed: %s\n", rd_kafka_err2str(err));
+}
+```
+
+**V_ macros:**
+
+| Macro | Type | Description |
+|-------|------|-------------|
+| `RD_KAFKA_V_TOPIC(name)` | `const char *` | Topic name |
+| `RD_KAFKA_V_PARTITION(p)` | `int32_t` | Partition number |
+| `RD_KAFKA_V_VALUE(buf, len)` | `void *, size_t` | Message payload |
+| `RD_KAFKA_V_KEY(buf, len)` | `const void *, size_t` | Message key |
+| `RD_KAFKA_V_OPAQUE(ptr)` | `void *` | Per-message opaque |
+| `RD_KAFKA_V_MSGFLAGS(flags)` | `int` | Message flags |
+| `RD_KAFKA_V_TIMESTAMP(ts)` | `int64_t` | Message timestamp (ms since epoch) |
+| `RD_KAFKA_V_HEADER(name, val, len)` | | Add a message header |
+| `RD_KAFKA_V_HEADERS(hdrs)` | `rd_kafka_headers_t *` | Pre-built headers object |
+| `RD_KAFKA_V_END` | | Terminates the argument list |
+
+## Delivery report callback
+
+Register a callback to receive per-message delivery notifications:
+
+```c delivery_report.c
+void dr_msg_cb(rd_kafka_t *rk,
+               const rd_kafka_message_t *rkmessage,
+               void *opaque) {
+    if (rkmessage->err) {
+        fprintf(stderr, "Message delivery failed: %s\n",
+                rd_kafka_err2str(rkmessage->err));
+    } else {
+        fprintf(stdout, "Message delivered to %s [%"PRId32"] at offset %"PRId64"\n",
+                rd_kafka_topic_name(rkmessage->rkt),
+                rkmessage->partition,
+                rkmessage->offset);
+    }
+}
+
+/* Register before creating the handle */
+rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+```
+
+**`rd_kafka_message_t` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `err` | `rd_kafka_resp_err_t` | Error code; 0 = success |
+| `rkt` | `rd_kafka_topic_t *` | Topic handle |
+| `partition` | `int32_t` | Partition the message was produced to |
+| `payload` | `void *` | Message payload pointer |
+| `len` | `size_t` | Payload length |
+| `key` | `void *` | Message key |
+| `keylen` | `size_t` | Key length |
+| `offset` | `int64_t` | Offset assigned by broker |
+
+Check message persistence status with:
+
+```c
+rd_kafka_msg_status_t status = rd_kafka_message_status(rkmessage);
+```
+
+Returns `RD_KAFKA_MSG_STATUS_NOT_PERSISTED`, `RD_KAFKA_MSG_STATUS_POSSIBLY_PERSISTED`, or `RD_KAFKA_MSG_STATUS_PERSISTED`.
+
+## Flushing and queue
+
+```c
+/* Block until all queued messages are delivered (or timeout_ms elapses) */
+rd_kafka_resp_err_t rd_kafka_flush(rd_kafka_t *rk, int timeout_ms);
+
+/* Returns the current number of messages in the producer queue */
+int rd_kafka_outq_len(rd_kafka_t *rk);
+
+/* Discard messages in queue and/or in-flight */
+rd_kafka_resp_err_t rd_kafka_purge(rd_kafka_t *rk, int purge_flags);
+```
+
+`purge_flags` can be `RD_KAFKA_PURGE_F_QUEUE`, `RD_KAFKA_PURGE_F_INFLIGHT`, or both OR'd together.
+
+## Polling
+
+Delivery report callbacks are only invoked when you call a poll function. Call `rd_kafka_poll()` regularly in your produce loop:
+
+```c poll_loop.c
+/* After each batch of produce() calls */
+rd_kafka_poll(rk, 0 /* non-blocking */);
+
+/* Before shutdown, flush all pending messages */
+rd_kafka_flush(rk, 30 * 1000 /* 30 seconds */);
+```
+
+<Warning>
+  If you never call `rd_kafka_poll()` or `rd_kafka_flush()`, delivery report callbacks will never fire and messages in the queue will be dropped on `rd_kafka_destroy()`.
+</Warning>

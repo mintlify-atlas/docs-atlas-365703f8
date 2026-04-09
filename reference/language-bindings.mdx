@@ -1,0 +1,71 @@
+---
+title: "Language bindings"
+description: "Official and community librdkafka bindings for other programming languages."
+---
+
+librdkafka is a C library that serves as the foundation for high-quality Apache Kafka clients across many languages. The C API is ABI-stable, meaning bindings built against any version of librdkafka will remain compatible with newer releases without recompilation.
+
+## Official Confluent clients
+
+The following clients are officially maintained by Confluent and built directly on top of librdkafka:
+
+<CardGroup cols={3}>
+  <Card
+    title="Python"
+    icon="python"
+    href="https://github.com/confluentinc/confluent-kafka-python"
+  >
+    **confluent-kafka-python** — The official Confluent Python client. Provides high-level producer, consumer, and admin client APIs with full EOS support.
+  </Card>
+  <Card
+    title="Go"
+    icon="golang"
+    href="https://github.com/confluentinc/confluent-kafka-go"
+  >
+    **confluent-kafka-go** — The official Confluent Go client. Wraps librdkafka via cgo, providing idiomatic Go APIs for producers, consumers, and admin operations.
+  </Card>
+  <Card
+    title=".NET / C#"
+    icon="microsoft"
+    href="https://github.com/confluentinc/confluent-kafka-dotnet"
+  >
+    **confluent-kafka-dotnet** — The official Confluent .NET client. Delivers a strongly-typed C# API built on the librdkafka C library via P/Invoke.
+  </Card>
+</CardGroup>
+
+---
+
+## Community bindings
+
+The following bindings are developed and maintained by the community. Quality and feature coverage vary by library.
+
+| Language | Library | Notes |
+|----------|---------|-------|
+| C++ | [cppkafka](https://github.com/mfontanini/cppkafka) | Modern C++11 wrapper around the C API |
+| C++ | [modern-cpp-kafka](https://github.com/Morgan-Stanley/modern-cpp-kafka) | Header-only C++17 API from Morgan Stanley |
+| Node.js | [node-rdkafka](https://github.com/Blizzard/node-rdkafka) | Native Node.js bindings from Blizzard Entertainment |
+| Ruby | [rdkafka-ruby](https://github.com/appsignal/rdkafka-ruby) | Modern Ruby bindings maintained by AppSignal |
+| Rust | [rust-rdkafka](https://github.com/fede1024/rust-rdkafka) | Fully async Rust bindings using librdkafka's C API |
+| PHP | [php-rdkafka](https://github.com/arnaud-lb/php-rdkafka) | PHP extension for librdkafka |
+| PHP | [php-simple-kafka-client](https://github.com/php-kafka/php-simple-kafka-client) | Alternative PHP extension with a simpler API |
+| Python | [PyKafka](https://github.com/Parsely/pykafka) | Python client from Parsely with optional librdkafka backend |
+| Erlang | [erlkaf](https://github.com/silviucpp/erlkaf) | Erlang NIF bindings for librdkafka |
+| Haskell | [hw-kafka](https://github.com/haskell-works/hw-kafka) | Haskell bindings with Conduit and Avro/Schema Registry support |
+| Common Lisp | [cl-rdkafka](https://github.com/SahilKang/cl-rdkafka) | Common Lisp CFFI bindings |
+| Lua | [luardkafka](https://github.com/mistsv/luardkafka) | Lua bindings for librdkafka |
+| OCaml | [ocaml-kafka](https://github.com/didier-wenzek/ocaml-kafka) | OCaml bindings |
+| Perl | [Net::Kafka](https://github.com/bookingcom/perl-Net-Kafka) | Perl XS bindings from Booking.com |
+| Tcl | [KafkaTcl](https://github.com/flightaware/kafkatcl) | Tcl bindings from FlightAware |
+| Swift | [Perfect-Kafka](https://github.com/PerfectlySoft/Perfect-Kafka) | Swift bindings for the Perfect framework |
+| Shell | [kafkacat](https://github.com/edenhill/kafkacat) | Command-line producer and consumer tool built on librdkafka |
+| D (C-like) | [librdkafka](https://github.com/DlangApache/librdkafka/) | D language bindings (C-style API) |
+| D (C++-like) | [librdkafka-d](https://github.com/tamediadigital/librdkafka-d) | D language bindings (C++-style API) |
+| Kotlin Native | [Kafka-Kotlin-Native](https://github.com/icemachined/kafka-kotlin-native) | Kotlin/Native bindings for librdkafka |
+
+<Note>
+  librdkafka guarantees C API ABI stability. Bindings compiled against any release of librdkafka are compatible with newer versions of the shared library without recompilation. The C++ API provides API stability but not ABI stability — C++ bindings must be recompiled when upgrading librdkafka.
+</Note>
+
+<Tip>
+  See the [Powered by librdkafka](https://github.com/confluentinc/librdkafka/wiki/Powered-by-librdkafka) wiki page for a broader list of projects and companies using librdkafka in production.
+</Tip>

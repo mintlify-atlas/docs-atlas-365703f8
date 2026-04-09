@@ -1,0 +1,194 @@
+---
+title: "C++ Producer API"
+description: "Producing messages with RdKafka::Producer."
+---
+
+`RdKafka::Producer` is the C++ high-level producer. Link with `-lrdkafka++`.
+
+## Creating a producer
+
+```cpp producer_create.cpp
+#include <rdkafkacpp.h>
+
+std::string errstr;
+
+// 1. Create config
+RdKafka::Conf *conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+conf->set("bootstrap.servers", "localhost:9092", errstr);
+
+// 2. Register delivery report callback
+class MyDeliveryReportCb : public RdKafka::DeliveryReportCb {
+ public:
+  void dr_cb(RdKafka::Message &message) {
+    if (message.err()) {
+      std::cerr << "Delivery failed: " << message.errstr() << std::endl;
+    } else {
+      std::cout << "Delivered to " << message.topic_name()
+                << " [" << message.partition() << "] "
+                << "at offset " << message.offset() << std::endl;
+    }
+  }
+};
+
+MyDeliveryReportCb dr_cb;
+conf->set("dr_cb", &dr_cb, errstr);
+
+// 3. Create producer
+RdKafka::Producer *producer = RdKafka::Producer::create(conf, errstr);
+if (!producer) {
+    std::cerr << "Failed to create producer: " << errstr << std::endl;
+    delete conf;
+    return 1;
+}
+delete conf; // conf is consumed by create()
+```
+
+## Configuration
+
+Use `RdKafka::Conf::create()` for global (client) or per-topic configuration:
+
+```cpp
+RdKafka::Conf *conf  = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+RdKafka::Conf *tconf = RdKafka::Conf::create(RdKafka::Conf::CONF_TOPIC);
+```
+
+`conf->set(name, value, errstr)` returns `RdKafka::Conf::CONF_OK` on success.
+
+## Producing messages
+
+```cpp
+RdKafka::ErrorCode Producer::produce(
+    const std::string   topic_name,
+    int32_t             partition,
+    int                 msgflags,
+    void               *payload,
+    size_t              len,
+    const std::string  *key,
+    void               *msg_opaque);
+
+/* Overload with raw key */
+RdKafka::ErrorCode Producer::produce(
+    const std::string  topic_name,
+    int32_t            partition,
+    int                msgflags,
+    void              *payload,
+    size_t             len,
+    const void        *key,
+    size_t             key_len,
+    int64_t            timestamp,
+    RdKafka::Headers  *headers,
+    void              *msg_opaque);
+```
+
+**`msgflags`:**
+
+| Flag | Description |
+|------|-------------|
+| `RdKafka::Producer::RK_MSG_FREE` | librdkafka frees `payload` after use |
+| `RdKafka::Producer::RK_MSG_COPY` | librdkafka copies `payload` |
+| `RdKafka::Producer::RK_MSG_BLOCK` | Block if queue is full |
+
+Use `RdKafka::Topic::PARTITION_UA` for automatic partitioning.
+
+```cpp produce_example.cpp
+std::string value = "hello, kafka";
+
+RdKafka::ErrorCode err = producer->produce(
+    "my-topic",
+    RdKafka::Topic::PARTITION_UA,
+    RdKafka::Producer::RK_MSG_COPY,
+    const_cast<char *>(value.c_str()), value.size(),
+    nullptr,  // no key
+    0, 0,     // key_len, timestamp (0 = use current time)
+    nullptr,  // no headers
+    nullptr); // msg_opaque
+
+if (err != RdKafka::ERR_NO_ERROR) {
+    std::cerr << "Produce failed: " << RdKafka::err2str(err) << std::endl;
+    if (err == RdKafka::ERR__QUEUE_FULL) {
+        producer->poll(1000); // Let delivery reports drain queue
+    }
+}
+
+// Serve delivery callbacks
+producer->poll(0);
+```
+
+## Delivery report callback
+
+`RdKafka::DeliveryReportCb::dr_cb()` is called once per message. `message.err()` is `ERR_NO_ERROR` on success.
+
+Key `RdKafka::Message` methods:
+
+| Method | Returns |
+|--------|---------|
+| `err()` | `ErrorCode` — 0 on success |
+| `errstr()` | Human-readable error string |
+| `topic_name()` | Topic the message was produced to |
+| `partition()` | Assigned partition |
+| `offset()` | Committed offset |
+| `payload()` | Message payload pointer |
+| `len()` | Payload length |
+| `key()` | Message key string pointer |
+| `msg_opaque()` | Per-message opaque pointer |
+| `status()` | `RdKafka::Message::MSG_STATUS_*` persistence status |
+
+## Flushing and shutdown
+
+```cpp flush_shutdown.cpp
+// Wait up to 30 seconds for all messages to be delivered
+producer->flush(30 * 1000);
+
+if (producer->outq_len() > 0)
+    std::cerr << producer->outq_len() << " messages were not delivered" << std::endl;
+
+delete producer;
+```
+
+<Warning>
+  Always call `flush()` before deleting the producer. Unflushed messages will be dropped.
+</Warning>
+
+## Transactional producer
+
+```cpp transactions.cpp
+// Configuration
+conf->set("transactional.id", "my-transactional-id", errstr);
+
+RdKafka::Producer *producer = RdKafka::Producer::create(conf, errstr);
+
+// Initialize transactions (call once at startup)
+RdKafka::Error *error = producer->init_transactions(10000);
+if (error) { /* handle */ delete error; }
+
+// Transaction loop
+error = producer->begin_transaction();
+if (error) { /* handle */ delete error; }
+
+// Produce messages...
+producer->produce("output-topic", ...);
+
+// Commit
+error = producer->commit_transaction(10000);
+if (error) {
+    if (error->txn_requires_abort()) {
+        producer->abort_transaction(10000);
+        // retry from begin_transaction()
+    } else if (error->is_fatal()) {
+        // destroy and exit
+    }
+    delete error;
+}
+```
+
+Transactional API methods on `RdKafka::Producer`:
+
+| Method | Description |
+|--------|-------------|
+| `init_transactions(timeout_ms)` | Initialize the transactional producer (call once) |
+| `begin_transaction()` | Start a new transaction |
+| `send_offsets_to_transaction(offsets, cgmetadata, timeout_ms)` | Include consumer offsets in transaction |
+| `commit_transaction(timeout_ms)` | Commit the transaction |
+| `abort_transaction(timeout_ms)` | Abort the transaction |
+
+All return `RdKafka::Error *` (NULL on success; caller must `delete` it).

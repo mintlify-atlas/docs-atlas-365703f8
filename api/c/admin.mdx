@@ -1,0 +1,220 @@
+---
+title: "Admin API"
+description: "C API reference for librdkafka administrative operations."
+---
+
+The Admin API allows you to manage Kafka cluster resources: topics, partitions, consumer groups, configurations, and more. Admin operations are available on any `rd_kafka_t` handle; a producer handle is recommended for admin-only use cases.
+
+<Note>
+  For admin-only use, create a producer with `allow.auto.create.topics=false` to avoid unintended topic creation during metadata lookups.
+</Note>
+
+## Admin options
+
+All admin operations accept an options object:
+
+```c
+/* Create options for a specific API */
+rd_kafka_AdminOptions_t *rd_kafka_AdminOptions_new(rd_kafka_t *rk,
+                                                    rd_kafka_admin_op_t for_api);
+
+/* Set how long the broker should wait for the operation to complete */
+rd_kafka_resp_err_t rd_kafka_AdminOptions_set_operation_timeout(
+    rd_kafka_AdminOptions_t *options,
+    int timeout_ms,
+    char *errstr,
+    size_t errstr_size);
+
+/* Set the total request+response timeout */
+rd_kafka_resp_err_t rd_kafka_AdminOptions_set_request_timeout(
+    rd_kafka_AdminOptions_t *options,
+    int timeout_ms,
+    char *errstr,
+    size_t errstr_size);
+
+void rd_kafka_AdminOptions_destroy(rd_kafka_AdminOptions_t *options);
+```
+
+## Result pattern
+
+All admin operations are **asynchronous**. Results are delivered to a queue you poll:
+
+```c admin_pattern.c
+/* Create a result queue */
+rd_kafka_queue_t *queue = rd_kafka_queue_new(rk);
+
+/* Fire the admin operation (e.g., CreateTopics) */
+rd_kafka_CreateTopics(rk, new_topics, topic_cnt, options, queue);
+
+/* Poll the queue for the result event */
+rd_kafka_event_t *event = rd_kafka_queue_poll(queue, 10000 /* ms */);
+if (!event) {
+    fprintf(stderr, "Timed out waiting for result\n");
+} else {
+    if (rd_kafka_event_error(event)) {
+        fprintf(stderr, "Admin operation failed: %s\n",
+                rd_kafka_event_error_string(event));
+    } else {
+        /* Extract result (depends on operation type) */
+        const rd_kafka_CreateTopics_result_t *result =
+            rd_kafka_event_CreateTopics_result(event);
+        /* Process result... */
+    }
+    rd_kafka_event_destroy(event);
+}
+
+rd_kafka_queue_destroy(queue);
+```
+
+## Topic operations
+
+### Create topics
+
+```c
+/* Allocate a new topic specification */
+rd_kafka_NewTopic_t *rd_kafka_NewTopic_new(const char *topic,
+                                            int num_partitions,
+                                            int replication_factor,
+                                            char *errstr,
+                                            size_t errstr_size);
+
+/* Set topic-level config for the new topic */
+rd_kafka_resp_err_t rd_kafka_NewTopic_set_config(rd_kafka_NewTopic_t *new_topic,
+                                                  const char *name,
+                                                  const char *value);
+
+void rd_kafka_NewTopic_destroy(rd_kafka_NewTopic_t *new_topic);
+
+/* Fire CreateTopics request */
+void rd_kafka_CreateTopics(rd_kafka_t *rk,
+                            rd_kafka_NewTopic_t **new_topics,
+                            size_t new_topic_cnt,
+                            const rd_kafka_AdminOptions_t *options,
+                            rd_kafka_queue_t *rkqu);
+```
+
+Example:
+
+```c create_topic.c
+char errstr[512];
+rd_kafka_NewTopic_t *nt = rd_kafka_NewTopic_new("my-topic", 3, 1,
+                                                  errstr, sizeof(errstr));
+rd_kafka_NewTopic_set_config(nt, "retention.ms", "86400000");
+
+rd_kafka_NewTopic_t *new_topics[] = { nt };
+rd_kafka_CreateTopics(rk, new_topics, 1, NULL, queue);
+
+rd_kafka_NewTopic_destroy(nt);
+```
+
+### Delete topics
+
+```c
+rd_kafka_DeleteTopic_t *rd_kafka_DeleteTopic_new(const char *topic);
+void rd_kafka_DeleteTopic_destroy(rd_kafka_DeleteTopic_t *del_topic);
+
+void rd_kafka_DeleteTopics(rd_kafka_t *rk,
+                            rd_kafka_DeleteTopic_t **del_topics,
+                            size_t del_topic_cnt,
+                            const rd_kafka_AdminOptions_t *options,
+                            rd_kafka_queue_t *rkqu);
+```
+
+### Create partitions
+
+```c
+rd_kafka_NewPartitions_t *rd_kafka_NewPartitions_new(const char *topic,
+                                                      size_t new_total_cnt,
+                                                      char *errstr,
+                                                      size_t errstr_size);
+void rd_kafka_NewPartitions_destroy(rd_kafka_NewPartitions_t *new_parts);
+
+void rd_kafka_CreatePartitions(rd_kafka_t *rk,
+                                rd_kafka_NewPartitions_t **newps,
+                                size_t newps_cnt,
+                                const rd_kafka_AdminOptions_t *options,
+                                rd_kafka_queue_t *rkqu);
+```
+
+## Configuration operations
+
+```c
+/* Describe resource configuration (topics, brokers) */
+void rd_kafka_DescribeConfigs(rd_kafka_t *rk,
+                               rd_kafka_ConfigResource_t **configs,
+                               size_t config_cnt,
+                               const rd_kafka_AdminOptions_t *options,
+                               rd_kafka_queue_t *rkqu);
+
+/* Alter resource configuration */
+void rd_kafka_AlterConfigs(rd_kafka_t *rk,
+                            rd_kafka_ConfigResource_t **configs,
+                            size_t config_cnt,
+                            const rd_kafka_AdminOptions_t *options,
+                            rd_kafka_queue_t *rkqu);
+
+/* Incrementally alter resource configuration */
+void rd_kafka_IncrementalAlterConfigs(rd_kafka_t *rk,
+                                       rd_kafka_ConfigResource_t **configs,
+                                       size_t config_cnt,
+                                       const rd_kafka_AdminOptions_t *options,
+                                       rd_kafka_queue_t *rkqu);
+```
+
+## Consumer group operations
+
+```c
+/* List consumer groups */
+void rd_kafka_ListConsumerGroups(rd_kafka_t *rk,
+                                  const rd_kafka_AdminOptions_t *options,
+                                  rd_kafka_queue_t *rkqu);
+
+/* Describe consumer groups */
+void rd_kafka_DescribeConsumerGroups(rd_kafka_t *rk,
+                                      const char **groups,
+                                      size_t groups_cnt,
+                                      const rd_kafka_AdminOptions_t *options,
+                                      rd_kafka_queue_t *rkqu);
+
+/* Delete consumer groups */
+void rd_kafka_DeleteGroups(rd_kafka_t *rk,
+                            rd_kafka_DeleteGroup_t **del_groups,
+                            size_t del_group_cnt,
+                            const rd_kafka_AdminOptions_t *options,
+                            rd_kafka_queue_t *rkqu);
+
+/* List consumer group offsets */
+void rd_kafka_ListConsumerGroupOffsets(rd_kafka_t *rk,
+                                        rd_kafka_ListConsumerGroupOffsets_t **listgrpoffsets,
+                                        size_t listgrpoffsets_cnt,
+                                        const rd_kafka_AdminOptions_t *options,
+                                        rd_kafka_queue_t *rkqu);
+
+/* Alter (reset) consumer group offsets */
+void rd_kafka_AlterConsumerGroupOffsets(rd_kafka_t *rk,
+                                         rd_kafka_AlterConsumerGroupOffsets_t **altergrpoffsets,
+                                         size_t altergrpoffsets_cnt,
+                                         const rd_kafka_AdminOptions_t *options,
+                                         rd_kafka_queue_t *rkqu);
+```
+
+## Cluster operations
+
+```c
+/* Describe the cluster (broker list, controller, cluster ID) */
+void rd_kafka_DescribeCluster(rd_kafka_t *rk,
+                               const rd_kafka_AdminOptions_t *options,
+                               rd_kafka_queue_t *rkqu);
+
+/* Describe topics (metadata + partition info) */
+void rd_kafka_DescribeTopics(rd_kafka_t *rk,
+                              rd_kafka_TopicCollection_t *topics,
+                              const rd_kafka_AdminOptions_t *options,
+                              rd_kafka_queue_t *rkqu);
+
+/* Elect leaders for partitions */
+void rd_kafka_ElectLeaders(rd_kafka_t *rk,
+                            rd_kafka_ElectLeaders_t *elect_leaders,
+                            const rd_kafka_AdminOptions_t *options,
+                            rd_kafka_queue_t *rkqu);
+```

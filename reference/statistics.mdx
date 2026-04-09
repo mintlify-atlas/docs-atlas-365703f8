@@ -1,0 +1,179 @@
+---
+title: "Statistics reference"
+description: "Complete reference for librdkafka's JSON statistics output."
+---
+
+librdkafka can emit internal metrics at a fixed interval by setting `statistics.interval.ms` to a value greater than `0` and registering a `stats_cb` callback. The stats are delivered as a JSON object string.
+
+```c
+/* Register the callback */
+rd_kafka_conf_set_stats_cb(conf, my_stats_cb);
+
+/* Set the interval (1 second) */
+rd_kafka_conf_set(conf, "statistics.interval.ms", "1000", errstr, sizeof(errstr));
+```
+
+The callback signature is:
+
+```c
+int my_stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
+    /* Parse or log the JSON string */
+    printf("%.*s\n", (int)json_len, json);
+    return 0; /* Return 0 to avoid having librdkafka free the json buffer */
+}
+```
+
+<Note>
+  Metrics are not guaranteed to be perfectly consistent between brokers, topic-partitions, and totals due to the asynchronous nature of librdkafka. For example, the top-level `tx` counter may be less than the sum of per-broker `tx` values.
+</Note>
+
+## General structure
+
+```json
+{
+  "<top-level fields>": "...",
+  "brokers": {
+    "<broker-name>": {
+      "<broker fields>": "...",
+      "toppars": { "<topic-partition fields>": "..." }
+    }
+  },
+  "topics": {
+    "<topic-name>": {
+      "<topic fields>": "...",
+      "partitions": { "<partition-id>": { "<partition fields>": "..." } }
+    }
+  },
+  "cgrp": { "<consumer group fields>": "..." },
+  "eos": { "<EOS/idempotent producer fields>": "..." }
+}
+```
+
+All size fields are in **bytes** unless otherwise noted.
+
+---
+
+## Top-level fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Handle instance name (e.g., `"rdkafka#producer-1"`) |
+| `client_id` | string | The configured (or default) `client.id` |
+| `type` | string | Instance type: `"producer"` or `"consumer"` |
+| `ts` | int | librdkafka's internal monotonic clock (microseconds) |
+| `time` | int | Wall clock time in seconds since the Unix epoch |
+| `age` | int | Time since this client instance was created (microseconds) |
+| `replyq` | int gauge | Number of ops (callbacks, events) waiting in queue for `rd_kafka_poll()` |
+| `msg_cnt` | int gauge | Current number of messages in producer queues |
+| `msg_size` | int gauge | Current total size of messages in producer queues (bytes) |
+| `msg_max` | int | Maximum number of messages allowed on producer queues (threshold) |
+| `msg_size_max` | int | Maximum total size of messages allowed on producer queues (threshold, bytes) |
+| `tx` | int | Total number of requests sent to Kafka brokers |
+| `tx_bytes` | int | Total bytes transmitted to Kafka brokers |
+| `rx` | int | Total number of responses received from Kafka brokers |
+| `rx_bytes` | int | Total bytes received from Kafka brokers |
+| `txmsgs` | int | Total messages transmitted (produced) to Kafka brokers |
+| `txmsg_bytes` | int | Total message bytes transmitted (including framing) |
+| `rxmsgs` | int | Total messages consumed from Kafka brokers (excluding ignored messages) |
+| `rxmsg_bytes` | int | Total message bytes received (including framing) |
+| `simple_cnt` | int gauge | Internal tracking of legacy vs. new consumer API state |
+| `metadata_cache_cnt` | int gauge | Number of topics in the metadata cache |
+
+---
+
+## Broker fields
+
+One entry per broker in the `brokers` object. The key is `"<hostname>:<port>/<brokerid>"`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Broker hostname, port and broker id (e.g., `"example.com:9092/13"`) |
+| `nodeid` | int | Broker ID (`-1` for bootstrap brokers) |
+| `nodename` | string | Broker hostname and port (e.g., `"example.com:9092"`) |
+| `source` | string | Broker source: `learned`, `configured`, `internal`, or `logical` |
+| `state` | string | Broker state: `INIT`, `DOWN`, `CONNECT`, `AUTH`, `APIVERSION_QUERY`, `AUTH_HANDSHAKE`, `UP`, `UPDATE` |
+| `stateage` | int gauge | Time since last broker state change (microseconds) |
+| `outbuf_cnt` | int gauge | Number of requests awaiting transmission to broker |
+| `outbuf_msg_cnt` | int gauge | Number of messages awaiting transmission to broker |
+| `waitresp_cnt` | int gauge | Number of requests in-flight awaiting a response |
+| `waitresp_msg_cnt` | int gauge | Number of messages in-flight awaiting a response |
+| `tx` | int | Total requests sent to this broker |
+| `txbytes` | int | Total bytes sent to this broker |
+| `txerrs` | int | Total transmission errors |
+| `txretries` | int | Total request retries |
+| `rx` | int | Total responses received from this broker |
+| `rxbytes` | int | Total bytes received from this broker |
+| `rxerrs` | int | Total receive errors |
+| `rxcorriderrs` | int | Unmatched correlation IDs in responses (typically timed-out requests) |
+| `req_timeouts` | int | Total requests timed out |
+| `connects` | int | Number of connection attempts (including failures and DNS errors) |
+| `disconnects` | int | Number of disconnects (triggered by broker, network, or load balancer) |
+| `rtt` | object | Broker round-trip time in microseconds. See **Window stats** below. |
+| `throttle` | object | Broker throttling time in milliseconds. See **Window stats** below. |
+| `int_latency` | object | Internal producer queue latency in microseconds. See **Window stats** below. |
+| `outbuf_latency` | object | Internal request queue latency in microseconds. See **Window stats** below. |
+
+### Window stats
+
+The `rtt`, `throttle`, `int_latency`, and `outbuf_latency` fields are rolling window stat objects with these subfields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `min` | int gauge | Smallest value in window |
+| `max` | int gauge | Largest value in window |
+| `avg` | int gauge | Average value |
+| `sum` | int gauge | Sum of values |
+| `cnt` | int gauge | Number of values sampled |
+| `stddev` | int gauge | Standard deviation (based on histogram) |
+| `p50` | int gauge | 50th percentile |
+| `p75` | int gauge | 75th percentile |
+| `p90` | int gauge | 90th percentile |
+| `p95` | int gauge | 95th percentile |
+| `p99` | int gauge | 99th percentile |
+| `p99_99` | int gauge | 99.99th percentile |
+
+---
+
+## Topic fields
+
+One entry per topic in the `topics` object. The key is the topic name.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `topic` | string | Topic name |
+| `age` | int gauge | Age of client's topic object (milliseconds) |
+| `metadata_age` | int gauge | Age of metadata from broker for this topic (milliseconds) |
+| `batchsize` | object | Batch sizes in bytes. See **Window stats** above. |
+| `batchcnt` | object | Batch message counts. See **Window stats** above. |
+| `partitions` | object | Dict of partitions, key is partition ID. See **Partition fields** below. |
+
+---
+
+## Partition fields
+
+One entry per partition in a topic's `partitions` object. The key is the partition ID (as a string). `-1` is the internal UA (UnAssigned) partition.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `partition` | int | Partition ID (`-1` for the internal UnAssigned partition) |
+| `leader` | int | Current leader broker ID |
+| `desired` | bool | Partition is explicitly desired by the application |
+| `unknown` | bool | Partition not seen in topic metadata from broker |
+| `msgq_cnt` | int gauge | Number of messages waiting to be produced in the first-level queue |
+| `msgq_bytes` | int gauge | Bytes in `msgq_cnt` |
+| `xmit_msgq_cnt` | int gauge | Number of messages ready to be produced in the transmit queue |
+| `fetchq_cnt` | int gauge | Number of pre-fetched messages in the fetch queue |
+| `fetch_state` | string | Consumer fetch state: `none`, `stopping`, `stopped`, `offset-query`, `offset-wait`, `active` |
+| `committed_offset` | int gauge | Last committed offset |
+| `lo_offset` | int gauge | Partition's low watermark offset on broker |
+| `hi_offset` | int gauge | Partition's high watermark offset on broker |
+| `ls_offset` | int gauge | Partition's last stable offset on broker (same as `hi_offset` for brokers < 0.11.0) |
+| `consumer_lag` | int gauge | Difference between `hi_offset` (or `ls_offset`) and `committed_offset` |
+| `consumer_lag_stored` | int gauge | Difference between `hi_offset` (or `ls_offset`) and `stored_offset` |
+| `txmsgs` | int | Total messages transmitted (produced) for this partition |
+| `rxmsgs` | int | Total messages consumed for this partition |
+| `msgs_inflight` | int gauge | Current number of messages in-flight to/from broker |
+
+<Tip>
+  Monitor `consumer_lag` per partition to detect slow consumers. A growing lag indicates the consumer cannot keep up with the producer rate.
+</Tip>

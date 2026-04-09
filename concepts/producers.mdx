@@ -1,0 +1,271 @@
+---
+title: "Producers"
+description: How the librdkafka producer works
+---
+
+## Overview
+
+A producer handle is created by calling `rd_kafka_new()` with the `RD_KAFKA_PRODUCER` type. The handle provides a global configuration context and shared state for all produce operations.
+
+```c
+rd_kafka_t *rk;
+rd_kafka_conf_t *conf;
+char errstr[512];
+
+conf = rd_kafka_conf_new();
+rd_kafka_conf_set(conf, "bootstrap.servers", "broker1:9092,broker2:9092",
+                  errstr, sizeof(errstr));
+
+/* Register delivery report callback before creating the handle */
+rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+/* rd_kafka_new() takes ownership of conf on success */
+rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+if (!rk) {
+    fprintf(stderr, "Failed to create producer: %s\n", errstr);
+    exit(1);
+}
+```
+
+<Note>
+`rd_kafka_new()` takes ownership of the `conf` object on success. Do not reference or free it after this call.
+</Note>
+
+## Message flow
+
+Messages move through the following stages before a delivery report is returned to your application:
+
+<Steps>
+  <Step title="Produce call">
+    Your application calls `rd_kafka_produce()` or `rd_kafka_producev()`. The call is non-blocking — it enqueues the message on an internal per-partition queue and returns immediately.
+  </Step>
+  <Step title="Batching">
+    librdkafka accumulates messages in the queue until `linger.ms` elapses or `batch.num.messages` / `batch.size` is reached, then packages them into a MessageSet.
+  </Step>
+  <Step title="ProduceRequest">
+    Background threads send the MessageSet to the partition leader broker as a ProduceRequest.
+  </Step>
+  <Step title="Broker acknowledgement">
+    The broker writes the messages and sends back a ProduceResponse (ack). Temporary errors trigger automatic retries.
+  </Step>
+  <Step title="Delivery report">
+    On the next call to `rd_kafka_poll()` (or `rd_kafka_flush()`), the registered `dr_msg_cb` is invoked once per message to report success or permanent failure.
+  </Step>
+</Steps>
+
+## Delivery report callback
+
+Register a `dr_msg_cb` before creating the producer handle to receive per-message delivery notifications. The callback is invoked from `rd_kafka_poll()` on the application thread.
+
+```c
+static void dr_msg_cb(rd_kafka_t *rk,
+                      const rd_kafka_message_t *rkmessage,
+                      void *opaque) {
+    if (rkmessage->err) {
+        fprintf(stderr, "Message delivery failed: %s\n",
+                rd_kafka_err2str(rkmessage->err));
+    } else {
+        fprintf(stderr, "Message delivered to partition %" PRId32
+                " at offset %" PRId64 "\n",
+                rkmessage->partition, rkmessage->offset);
+    }
+    /* rkmessage is destroyed automatically by librdkafka */
+}
+```
+
+- `rkmessage->err == RD_KAFKA_RESP_ERR_NO_ERROR` (0) — message delivered successfully.
+- `rkmessage->err != 0` — permanent delivery failure; inspect with `rd_kafka_err2str()`.
+- `rkmessage->_private` — contains the `msg_opaque` pointer passed to `produce()`.
+
+## Produce functions
+
+### `rd_kafka_produce()`
+
+```c
+int rd_kafka_produce(rd_kafka_topic_t *rkt,
+                     int32_t           partition,
+                     int               msgflags,
+                     void             *payload,
+                     size_t            len,
+                     const void       *key,
+                     size_t            keylen,
+                     void             *msg_opaque);
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `rkt` | Topic handle created with `rd_kafka_topic_new()` |
+| `partition` | Target partition number, or `RD_KAFKA_PARTITION_UA` to use the configured partitioner |
+| `msgflags` | Memory ownership flags (see below) |
+| `payload` | Message payload bytes |
+| `len` | Payload length in bytes |
+| `key` | Optional routing key (may be `NULL`) |
+| `keylen` | Key length in bytes |
+| `msg_opaque` | Optional per-message pointer passed back in the delivery report callback |
+
+Returns `0` on success, or `-1` with `errno` set on failure.
+
+### `rd_kafka_producev()`
+
+`rd_kafka_producev()` is a variadic alternative that does not require a pre-created topic object and supports additional fields such as message timestamp and headers.
+
+```c
+rd_kafka_resp_err_t err = rd_kafka_producev(
+    rk,
+    RD_KAFKA_V_TOPIC("my-topic"),
+    RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+    RD_KAFKA_V_VALUE(payload, payload_len),
+    RD_KAFKA_V_KEY(key, key_len),
+    RD_KAFKA_V_OPAQUE(msg_opaque),
+    RD_KAFKA_V_TIMESTAMP(timestamp_ms),   /* optional */
+    RD_KAFKA_V_HEADERS(hdrs),             /* optional */
+    RD_KAFKA_V_END
+);
+```
+
+Returns `RD_KAFKA_RESP_ERR_NO_ERROR` on success.
+
+## Message flags
+
+The `msgflags` parameter controls payload memory ownership.
+
+<Tabs>
+  <Tab title="RD_KAFKA_MSG_F_COPY">
+    librdkafka makes an internal copy of the payload immediately. The caller can reuse or free the buffer as soon as `produce()` returns.
+
+    ```c
+    rd_kafka_produce(rkt, RD_KAFKA_PARTITION_UA,
+                     RD_KAFKA_MSG_F_COPY,
+                     buf, len, NULL, 0, NULL);
+    /* buf can be reused immediately */
+    ```
+  </Tab>
+  <Tab title="RD_KAFKA_MSG_F_FREE">
+    librdkafka will call `free(3)` on the payload when it is done with it. The caller must not free the payload itself.
+
+    ```c
+    void *payload = malloc(len);
+    memcpy(payload, data, len);
+    rd_kafka_produce(rkt, RD_KAFKA_PARTITION_UA,
+                     RD_KAFKA_MSG_F_FREE,
+                     payload, len, NULL, 0, NULL);
+    /* do NOT free payload here */
+    ```
+  </Tab>
+  <Tab title="Zero-copy (neither flag)">
+    No copying or freeing is performed by librdkafka. The caller must keep the buffer valid and unmodified until the delivery report callback fires.
+
+    ```c
+    rd_kafka_produce(rkt, RD_KAFKA_PARTITION_UA,
+                     0,
+                     buf, len, NULL, 0, NULL);
+    /* buf must stay valid until dr_msg_cb is called */
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+`RD_KAFKA_MSG_F_FREE` and `RD_KAFKA_MSG_F_COPY` are mutually exclusive. If `rd_kafka_produce()` returns `-1` and `RD_KAFKA_MSG_F_FREE` was set, the payload ownership remains with the caller.
+</Warning>
+
+## Polling
+
+librdkafka delivers callbacks (including the delivery report callback) only when the application calls a polling function. Call `rd_kafka_poll()` regularly in your produce loop to drain the delivery queue.
+
+```c
+/* Non-blocking poll to serve pending delivery reports */
+rd_kafka_poll(rk, 0);
+
+/* Blocking poll waiting up to 1000 ms for an event */
+rd_kafka_poll(rk, 1000);
+```
+
+If the internal producer queue is full (`RD_KAFKA_RESP_ERR__QUEUE_FULL`), poll to flush completed messages and then retry:
+
+```c
+retry:
+    err = rd_kafka_producev(rk, RD_KAFKA_V_TOPIC(topic),
+                            RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+                            RD_KAFKA_V_VALUE(buf, len),
+                            RD_KAFKA_V_END);
+    if (err == RD_KAFKA_RESP_ERR__QUEUE_FULL) {
+        rd_kafka_poll(rk, 1000);
+        goto retry;
+    }
+```
+
+## Batching
+
+Three properties control how messages are accumulated before being sent to the broker:
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `linger.ms` | `5` | Maximum time to wait for a batch to fill up before sending |
+| `batch.num.messages` | `10000` | Maximum number of messages per batch |
+| `batch.size` | `1000000` | Maximum total batch size in bytes |
+
+A batch is sent when any of the three limits is reached first.
+
+<Tip>
+For high-throughput workloads, increase `linger.ms` to 50 ms or higher. For low-latency workloads, set it to `0` or `0.1` to send messages as soon as possible.
+</Tip>
+
+## Flushing
+
+Before destroying the producer, call `rd_kafka_flush()` to wait for all queued and in-flight messages to be delivered (or fail). This also triggers delivery report callbacks for all outstanding messages.
+
+```c
+/* Wait up to 60 seconds for all messages to be delivered */
+rd_kafka_flush(rk, 60 * 1000);
+
+if (rd_kafka_outq_len(rk) > 0)
+    fprintf(stderr, "%d message(s) were not delivered\n",
+            rd_kafka_outq_len(rk));
+```
+
+## Proper termination sequence
+
+```c
+/* 1. Flush all queued messages and serve delivery callbacks */
+rd_kafka_flush(rk, 60 * 1000);
+
+/* 2. Destroy topic objects created with rd_kafka_topic_new() */
+rd_kafka_topic_destroy(rkt);
+
+/* 3. Destroy the producer handle (blocks until background threads exit) */
+rd_kafka_destroy(rk);
+```
+
+<Warning>
+Messages that have not been flushed before `rd_kafka_destroy()` are silently dropped. Always call `rd_kafka_flush()` before destroying the handle.
+</Warning>
+
+## Message timestamps
+
+`rd_kafka_producev()` accepts an explicit timestamp with `RD_KAFKA_V_TIMESTAMP(ms)`. The value is a Unix epoch in milliseconds. If not set, librdkafka uses the current wall-clock time.
+
+The timestamp type visible to consumers is controlled by the topic's `log.message.timestamp.type` broker configuration:
+
+- `CreateTime` (default) — producer-set creation time.
+- `LogAppendTime` — time the message was appended to the log by the broker.
+
+To read the timestamp from a received message use `rd_kafka_message_timestamp()`.
+
+## Message headers
+
+Headers are key-value pairs attached to a message. Use the headers API with `rd_kafka_producev()`:
+
+```c
+rd_kafka_headers_t *hdrs = rd_kafka_headers_new(2);
+rd_kafka_header_add(hdrs, "request-id", -1, "abc-123", -1);
+rd_kafka_header_add(hdrs, "source",     -1, "service-a", -1);
+
+rd_kafka_producev(rk,
+    RD_KAFKA_V_TOPIC("my-topic"),
+    RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+    RD_KAFKA_V_VALUE(payload, payload_len),
+    RD_KAFKA_V_HEADERS(hdrs),  /* ownership transferred on success */
+    RD_KAFKA_V_END);
+```
+
+On success, librdkafka takes ownership of the headers object. On failure, destroy it yourself with `rd_kafka_headers_destroy()`.

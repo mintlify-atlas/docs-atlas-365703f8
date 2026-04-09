@@ -1,97 +1,76 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "librdkafka"
+description: "The Apache Kafka C/C++ client library — high-performance, production-ready, with exactly-once semantics and multi-million message-per-second throughput."
 ---
 
-## Setting up
+librdkafka is the de facto standard C/C++ client library for Apache Kafka. It provides Producer, Consumer, and Admin clients with a battle-tested API used by language bindings across the ecosystem — including Python, Go, .NET, Ruby, and more.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install librdkafka on Linux, macOS, Windows, or build from source.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Produce and consume your first messages in minutes.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="C API Reference" icon="c" href="/api/c/overview">
+    Complete reference for the C public API in `rdkafka.h`.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="C++ API Reference" icon="code" href="/api/cpp/overview">
+    Complete reference for the C++ public API in `rdkafkacpp.h`.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Key features
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="Exactly-Once Semantics" icon="shield-check" href="/guides/transactions-eos">
+    Full EOS support with idempotent and transactional producers conforming to KIP-98.
+  </Card>
+  <Card title="High Performance" icon="bolt" href="/guides/performance-tuning">
+    Over 1M msgs/sec producer and 3M msgs/sec consumer throughput on modern hardware.
+  </Card>
+  <Card title="Security" icon="lock" href="/guides/security">
+    SSL/TLS transport and SASL authentication including GSSAPI, SCRAM, and OAUTHBEARER/OIDC.
+  </Card>
+  <Card title="Statistics" icon="chart-bar" href="/guides/statistics">
+    Built-in JSON metrics for producers, consumers, brokers, and partitions.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Get started
 
-## Need inspiration?
+<Steps>
+  <Step title="Install librdkafka">
+    Install via your platform's package manager or build from source. See [Installation](/installation).
+  </Step>
+  <Step title="Configure your client">
+    Create a configuration object and set `bootstrap.servers` along with any security settings. See [Configuration](/concepts/configuration).
+  </Step>
+  <Step title="Produce or consume messages">
+    Use `rd_kafka_produce()` or `rd_kafka_consumer_poll()` to send and receive messages. See the [Quickstart](/quickstart).
+  </Step>
+  <Step title="Handle delivery reports">
+    Call `rd_kafka_poll()` regularly to serve callbacks and check delivery status.
+  </Step>
+</Steps>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+## Core concepts
+
+<CardGroup cols={2}>
+  <Card title="Producers" icon="paper-plane" href="/concepts/producers">
+    Understand batching, delivery guarantees, and the delivery report callback.
+  </Card>
+  <Card title="Consumers" icon="inbox" href="/concepts/consumers">
+    Consumer groups, offset management, rebalancing, and the poll loop.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/concepts/configuration">
+    Global and per-topic configuration properties with sensible defaults.
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/concepts/error-handling">
+    Retryable, permanent, and fatal errors — and how librdkafka handles them.
+  </Card>
+</CardGroup>
+
+<Note>
+  Use the latest [official release](https://github.com/confluentinc/librdkafka/releases) for production. The `master` branch is under active development.
+</Note>

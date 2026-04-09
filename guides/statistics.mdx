@@ -1,0 +1,218 @@
+---
+title: "Statistics"
+description: "Enable and parse librdkafka's built-in JSON metrics."
+---
+
+librdkafka emits internal metrics as a JSON string at a configurable interval. Use these metrics to monitor producer queue depth, broker latency, consumer lag, and EOS state — all without adding an external instrumentation library.
+
+<Note>
+Metrics may not be perfectly consistent across brokers, topic-partitions, and totals due to librdkafka's internal asynchronous nature. For example, the top-level `tx` counter may be slightly less than the sum of `brokers[].tx` values.
+</Note>
+
+## Enabling statistics
+
+Set `statistics.interval.ms` to a non-zero value and register a stats callback before creating the client handle.
+
+<Tabs>
+  <Tab title="C">
+    ```c
+    #include <librdkafka/rdkafka.h>
+    #include <stdio.h>
+
+    /**
+     * stats_cb is called every statistics.interval.ms with a JSON string.
+     * Return 0 to have librdkafka free the json buffer,
+     * or 1 to take ownership of it yourself.
+     */
+    static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len,
+                        void *opaque) {
+        /* Write to a file, parse with a JSON library, send to a metrics
+         * aggregator, etc. */
+        fprintf(stdout, "STATS: %.*s\n", (int)json_len, json);
+        return 0; /* librdkafka frees the buffer */
+    }
+
+    int main(void) {
+        rd_kafka_conf_t *conf = rd_kafka_conf_new();
+        char errstr[512];
+
+        /* Emit stats every 5 seconds */
+        rd_kafka_conf_set(conf, "statistics.interval.ms", "5000",
+                          errstr, sizeof(errstr));
+
+        /* Register the callback before rd_kafka_new() */
+        rd_kafka_conf_set_stats_cb(conf, stats_cb);
+
+        rd_kafka_t *rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf,
+                                      errstr, sizeof(errstr));
+
+        /* stats_cb is triggered by rd_kafka_poll() */
+        while (running)
+            rd_kafka_poll(rk, 1000);
+
+        rd_kafka_flush(rk, 30 * 1000);
+        rd_kafka_destroy(rk);
+        return 0;
+    }
+    ```
+  </Tab>
+  <Tab title="C++">
+    Implement `RdKafka::EventCb` and handle the `EVENT_STATS` event type:
+
+    ```cpp
+    #include <librdkafka/rdkafkacpp.h>
+    #include <iostream>
+
+    class MyEventCb : public RdKafka::EventCb {
+    public:
+        void event_cb(RdKafka::Event &event) override {
+            switch (event.type()) {
+            case RdKafka::Event::EVENT_STATS:
+                std::cout << "STATS: " << event.str() << std::endl;
+                break;
+            case RdKafka::Event::EVENT_ERROR:
+                std::cerr << "ERROR: " << event.str() << std::endl;
+                break;
+            default:
+                break;
+            }
+        }
+    };
+
+    int main() {
+        std::string errstr;
+        RdKafka::Conf *conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+
+        conf->set("statistics.interval.ms", "5000", errstr);
+        conf->set("bootstrap.servers", "localhost:9092", errstr);
+
+        MyEventCb event_cb;
+        conf->set("event_cb", &event_cb, errstr);
+
+        RdKafka::Producer *producer = RdKafka::Producer::create(conf, errstr);
+
+        while (running)
+            producer->poll(1000);
+
+        delete producer;
+        delete conf;
+        return 0;
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## JSON structure
+
+The statistics payload is a single JSON object with the following top-level structure:
+
+```json
+{
+  "name":              "rdkafka#producer-1",
+  "client_id":         "rdkafka",
+  "type":              "producer",
+  "ts":                12345678912345,
+  "time":              1712000000,
+  "age":               5000000,
+  "msg_cnt":           42,
+  "msg_size":          86016,
+  "msg_max":           500000,
+  "msg_size_max":      1073741824,
+  "tx":                1024,
+  "tx_bytes":          10485760,
+  "rx":                1024,
+  "rx_bytes":          204800,
+  "txmsgs":            50000,
+  "txmsg_bytes":       102400000,
+  "brokers": { ... },
+  "topics":  { ... },
+  "cgrp":    { ... },
+  "eos":     { ... }
+}
+```
+
+### Top-level fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Handle instance name (e.g. `rdkafka#producer-1`). |
+| `client_id` | string | The configured (or default) `client.id`. |
+| `type` | string | Instance type: `producer` or `consumer`. |
+| `ts` | int | librdkafka's internal monotonic clock in microseconds. |
+| `time` | int | Wall clock time in seconds since the Unix epoch. |
+| `msg_cnt` | int gauge | Current number of messages in producer queues. |
+| `msg_size` | int gauge | Current total size in bytes of messages in producer queues. |
+| `txmsgs` | int | Total messages transmitted (produced) to brokers. |
+| `rxmsgs` | int | Total messages consumed from brokers (excluding ignored). |
+
+### `brokers` object
+
+Keyed by `"hostname:port/broker-id"`. Each entry contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `state` | string | Broker state: `INIT`, `DOWN`, `CONNECT`, `AUTH`, `UP`, etc. |
+| `outbuf_cnt` | int gauge | Requests awaiting transmission to the broker. |
+| `outbuf_msg_cnt` | int gauge | Messages awaiting transmission to the broker. |
+| `waitresp_cnt` | int gauge | In-flight requests awaiting a response. |
+| `int_latency` | window | Time between `produce()` and MessageSet write (producer). High values indicate CPU contention. |
+| `outbuf_latency` | window | Time between request enqueue and TCP socket write. High values indicate CPU or network congestion. |
+| `rtt` | window | Round-trip time between TCP send and broker response. High values indicate broker load or network congestion. |
+| `throttle` | window | Broker throttle time in milliseconds due to quota limits. |
+
+Window stats objects contain `min`, `max`, `avg`, `sum`, `cnt`, `p50`, `p75`, `p90`, `p95`, `p99`, and `p99_99` fields.
+
+### `topics` object
+
+Keyed by topic name. Each topic entry contains a `partitions` object keyed by partition ID:
+
+| Field | Type | Description |
+|---|---|---|
+| `msgq_cnt` | int gauge | Messages waiting to be produced in the first-level queue. |
+| `msgq_bytes` | int gauge | Bytes in `msgq_cnt`. |
+| `xmit_msgq_cnt` | int gauge | Messages ready to transmit. |
+| `fetchq_cnt` | int gauge | Pre-fetched messages in the consumer fetch queue. |
+| `fetchq_size` | int gauge | Bytes in `fetchq`. |
+| `consumer_lag` | int gauge | Difference between high watermark and committed offset. |
+| `next_ack_seq` | int gauge | Next expected acknowledged sequence (idempotent producer). |
+| `next_err_seq` | int gauge | Next expected errored sequence (idempotent producer). |
+
+### `cgrp` object
+
+Present for consumer instances. Contains consumer group state, assignment count, rebalance statistics, and commit counters.
+
+### `eos` object
+
+Present when the idempotent or transactional producer is enabled. Contains the current producer epoch, PID, and idempotency-related counters.
+
+## Key metrics to monitor
+
+<AccordionGroup>
+  <Accordion title="Producer queue depth">
+    Watch `msg_cnt` and `msg_size` at the top level. If these grow continuously the producer is not keeping up with the produce rate — increase `linger.ms`, add compression, or scale produce throughput down.
+
+    ```json
+    { "msg_cnt": 125000, "msg_size": 256000000 }
+    ```
+  </Accordion>
+  <Accordion title="Broker round-trip time">
+    `brokers[name].rtt.avg` and `rtt.p99` in microseconds. A rising p99 suggests broker overload or network congestion between client and broker.
+
+    ```json
+    "rtt": { "min": 800, "avg": 1200, "p99": 4500, "max": 8000 }
+    ```
+  </Accordion>
+  <Accordion title="Pending transmit queue">
+    `brokers[name].outbuf_cnt` counts requests waiting to be written to the TCP socket. Persistent non-zero values indicate the network or broker cannot absorb messages fast enough.
+  </Accordion>
+  <Accordion title="Consumer fetch queue">
+    `topics[topic].partitions[id].fetchq_cnt` measures how many messages are pre-fetched and waiting for the application to consume. A large `fetchq_cnt` means the application is the bottleneck; a zero value means the consumer is faster than the broker is delivering.
+  </Accordion>
+  <Accordion title="Consumer lag">
+    `topics[topic].partitions[id].consumer_lag` is the difference between the high watermark (or last stable offset at `read_committed`) and the committed offset. Monitor per-partition lag to detect slow partitions.
+  </Accordion>
+</AccordionGroup>
+
+## Full schema reference
+
+A JSON Schema for the complete statistics object is included in the librdkafka repository at [`src/statistics-schema.json`](https://github.com/confluentinc/librdkafka/blob/master/src/statistics-schema.json). Use it to validate parsed payloads or generate typed data structures in your language of choice.
